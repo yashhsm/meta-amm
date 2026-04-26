@@ -5,6 +5,11 @@ pub enum MathError {
     Underflow,
     InvalidAmount,
     InvalidFee,
+    InvalidConfig,
     EmptyLiquidity,
     DecimalsOutOfRange,
+    StaleQuote,
+    QuoteProtected,
+    InventoryBand,
+    PoolPaused,
 }

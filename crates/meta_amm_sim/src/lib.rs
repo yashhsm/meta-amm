@@ -1,4 +1,7 @@
-use meta_amm_math::{cpmm_quote_exact_in, CpmmReserves, MathError, Q64x64};
+use meta_amm_math::{
+    cpmm_quote_exact_in, reference_quote_exact_in, CpmmReserves, MathError, Q64x64, QuoteAgeState,
+    ReferenceQuoteParams, ReferenceQuoteState,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
@@ -68,6 +71,34 @@ pub struct GeneratedCpmmScenario {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferenceQuoteScenario {
+    pub assumptions: ScenarioAssumptions,
+    pub initial_base_inventory: u64,
+    pub initial_quote_inventory: u64,
+    pub target_base_inventory: u64,
+    pub initial_mid_price: Q64x64,
+    pub maker_update_period_slots: u64,
+    pub params: ReferenceQuoteParams,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GeneratedReferenceQuoteScenario {
+    pub assumptions: ScenarioAssumptions,
+    pub seed: u128,
+    pub slots_per_path: u64,
+    pub initial_base_inventory: u64,
+    pub initial_quote_inventory: u64,
+    pub target_base_inventory: u64,
+    pub initial_fair_price: Q64x64,
+    pub maker_update_period_slots: u64,
+    pub params: ReferenceQuoteParams,
+    pub volatility_bps_per_slot: u16,
+    pub drift_bps_per_slot: i16,
+    pub trade_probability_bps: u16,
+    pub max_trade_base_atoms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AggregateReport {
     pub assumptions: ScenarioAssumptions,
     pub paths: u32,
@@ -76,6 +107,63 @@ pub struct AggregateReport {
     pub fill_rate_bps: SummaryU16,
     pub fees_quote_atoms: SummaryU128,
     pub taker_edge_quote_atoms: SummaryI128,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferenceQuoteReport {
+    pub assumptions: ScenarioAssumptions,
+    pub trades_attempted: u64,
+    pub trades_filled: u64,
+    pub rejected_stale: u64,
+    pub rejected_protected: u64,
+    pub rejected_inventory: u64,
+    pub rejected_other: u64,
+    pub fresh_fills: u64,
+    pub aging_fills: u64,
+    pub protected_fills: u64,
+    pub fees_quote_atoms: u128,
+    pub taker_edge_quote_atoms: i128,
+    pub final_base_inventory: u64,
+    pub final_quote_inventory: u64,
+    pub max_abs_inventory_imbalance_bps: u16,
+}
+
+impl ReferenceQuoteReport {
+    pub fn fill_rate_bps(&self) -> u16 {
+        if self.trades_attempted == 0 {
+            return 0;
+        }
+        ((self.trades_filled * 10_000) / self.trades_attempted) as u16
+    }
+
+    pub fn rejected_total(&self) -> u64 {
+        self.rejected_stale
+            .saturating_add(self.rejected_protected)
+            .saturating_add(self.rejected_inventory)
+            .saturating_add(self.rejected_other)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferenceQuoteAggregateReport {
+    pub assumptions: ScenarioAssumptions,
+    pub paths: u32,
+    pub trades_attempted: SummaryU64,
+    pub trades_filled: SummaryU64,
+    pub fill_rate_bps: SummaryU16,
+    pub rejected_stale: SummaryU64,
+    pub rejected_protected: SummaryU64,
+    pub rejected_inventory: SummaryU64,
+    pub rejected_other: SummaryU64,
+    pub fees_quote_atoms: SummaryU128,
+    pub taker_edge_quote_atoms: SummaryI128,
+    pub max_abs_inventory_imbalance_bps: SummaryU16,
+}
+
+impl ReferenceQuoteAggregateReport {
+    pub fn is_single_path(&self) -> bool {
+        self.paths == 1
+    }
 }
 
 impl AggregateReport {
@@ -170,6 +258,114 @@ pub fn simulate_generated_cpmm(
     Ok(aggregate_reports(scenario.assumptions, &reports))
 }
 
+pub fn simulate_reference_quote(
+    scenario: ReferenceQuoteScenario,
+    events: &[FlowEvent],
+) -> Result<ReferenceQuoteReport, MathError> {
+    if scenario.maker_update_period_slots == 0 {
+        return Err(MathError::InvalidConfig);
+    }
+
+    let mut state = ReferenceQuoteState {
+        base_inventory: scenario.initial_base_inventory,
+        quote_inventory: scenario.initial_quote_inventory,
+        target_base_inventory: scenario.target_base_inventory,
+        mid_price: scenario.initial_mid_price,
+        mid_publish_slot: 0,
+        now_slot: 0,
+        paused: false,
+    };
+    let mut report = ReferenceQuoteReport {
+        assumptions: scenario.assumptions,
+        trades_attempted: events.len() as u64,
+        trades_filled: 0,
+        rejected_stale: 0,
+        rejected_protected: 0,
+        rejected_inventory: 0,
+        rejected_other: 0,
+        fresh_fills: 0,
+        aging_fills: 0,
+        protected_fills: 0,
+        fees_quote_atoms: 0,
+        taker_edge_quote_atoms: 0,
+        final_base_inventory: state.base_inventory,
+        final_quote_inventory: state.quote_inventory,
+        max_abs_inventory_imbalance_bps: inventory_imbalance_abs_bps(
+            state.base_inventory,
+            state.target_base_inventory,
+        ),
+    };
+
+    for event in events {
+        if event.slot.saturating_sub(state.mid_publish_slot) >= scenario.maker_update_period_slots {
+            state.mid_price = event.fair_price;
+            state.mid_publish_slot = event.slot;
+        }
+        state.now_slot = event.slot;
+
+        let base_to_quote = matches!(event.side, Side::BaseToQuote);
+        match reference_quote_exact_in(state, scenario.params, event.amount_in, base_to_quote) {
+            Ok(quote) => {
+                report.trades_filled += 1;
+                match quote.age_state {
+                    QuoteAgeState::Fresh => report.fresh_fills += 1,
+                    QuoteAgeState::Aging => report.aging_fills += 1,
+                    QuoteAgeState::Protected => report.protected_fills += 1,
+                    QuoteAgeState::Expired | QuoteAgeState::Paused => {}
+                }
+                report.fees_quote_atoms = report
+                    .fees_quote_atoms
+                    .saturating_add(fee_in_quote_atoms(event, quote.amount_in_less_fee)?);
+                report.taker_edge_quote_atoms = report
+                    .taker_edge_quote_atoms
+                    .saturating_add(taker_edge_quote_atoms(event, quote.amount_out)?);
+                state.base_inventory = quote.new_base_inventory;
+                state.quote_inventory = quote.new_quote_inventory;
+                report.max_abs_inventory_imbalance_bps = report
+                    .max_abs_inventory_imbalance_bps
+                    .max(inventory_imbalance_abs_bps(
+                        state.base_inventory,
+                        state.target_base_inventory,
+                    ));
+            }
+            Err(MathError::StaleQuote) => report.rejected_stale += 1,
+            Err(MathError::QuoteProtected) => report.rejected_protected += 1,
+            Err(MathError::InventoryBand) => report.rejected_inventory += 1,
+            Err(MathError::InvalidAmount) | Err(MathError::EmptyLiquidity) => {
+                report.rejected_other += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    report.final_base_inventory = state.base_inventory;
+    report.final_quote_inventory = state.quote_inventory;
+    Ok(report)
+}
+
+pub fn simulate_generated_reference_quote(
+    scenario: GeneratedReferenceQuoteScenario,
+) -> Result<ReferenceQuoteAggregateReport, MathError> {
+    let paths = scenario.assumptions.path_count.max(1);
+    let mut reports = Vec::with_capacity(paths as usize);
+
+    for path_index in 0..paths {
+        let path_events = generate_reference_flow_path(scenario, path_index)?;
+        let path_scenario = ReferenceQuoteScenario {
+            assumptions: scenario.assumptions,
+            initial_base_inventory: scenario.initial_base_inventory,
+            initial_quote_inventory: scenario.initial_quote_inventory,
+            target_base_inventory: scenario.target_base_inventory,
+            initial_mid_price: scenario.initial_fair_price,
+            maker_update_period_slots: scenario.maker_update_period_slots,
+            params: scenario.params,
+        };
+        reports.push(simulate_reference_quote(path_scenario, &path_events)?);
+    }
+
+    Ok(aggregate_reference_reports(scenario.assumptions, &reports))
+}
+
 pub fn generate_flow_path(
     scenario: GeneratedCpmmScenario,
     path_index: u32,
@@ -217,6 +413,28 @@ pub fn generate_flow_path(
     Ok(events)
 }
 
+pub fn generate_reference_flow_path(
+    scenario: GeneratedReferenceQuoteScenario,
+    path_index: u32,
+) -> Result<Vec<FlowEvent>, MathError> {
+    let cpmm_like = GeneratedCpmmScenario {
+        assumptions: scenario.assumptions,
+        seed: scenario.seed,
+        slots_per_path: scenario.slots_per_path,
+        initial_reserves: CpmmReserves {
+            base: scenario.initial_base_inventory,
+            quote: scenario.initial_quote_inventory,
+        },
+        initial_fair_price: scenario.initial_fair_price,
+        fee_bps: scenario.params.fee_bps,
+        volatility_bps_per_slot: scenario.volatility_bps_per_slot,
+        drift_bps_per_slot: scenario.drift_bps_per_slot,
+        trade_probability_bps: scenario.trade_probability_bps,
+        max_trade_base_atoms: scenario.max_trade_base_atoms,
+    };
+    generate_flow_path(cpmm_like, path_index)
+}
+
 fn update_integer_price(
     price: u64,
     drift_bps_per_slot: i16,
@@ -248,6 +466,35 @@ fn aggregate_reports(assumptions: ScenarioAssumptions, reports: &[SimReport]) ->
         taker_edge_quote_atoms: summarize_i128(
             reports.iter().map(|report| report.taker_edge_quote_atoms),
             paths,
+        ),
+    }
+}
+
+fn aggregate_reference_reports(
+    assumptions: ScenarioAssumptions,
+    reports: &[ReferenceQuoteReport],
+) -> ReferenceQuoteAggregateReport {
+    let paths = reports.len().max(1) as u128;
+
+    ReferenceQuoteAggregateReport {
+        assumptions,
+        paths: reports.len() as u32,
+        trades_attempted: summarize_u64(reports.iter().map(|report| report.trades_attempted)),
+        trades_filled: summarize_u64(reports.iter().map(|report| report.trades_filled)),
+        fill_rate_bps: summarize_u16(reports.iter().map(ReferenceQuoteReport::fill_rate_bps)),
+        rejected_stale: summarize_u64(reports.iter().map(|report| report.rejected_stale)),
+        rejected_protected: summarize_u64(reports.iter().map(|report| report.rejected_protected)),
+        rejected_inventory: summarize_u64(reports.iter().map(|report| report.rejected_inventory)),
+        rejected_other: summarize_u64(reports.iter().map(|report| report.rejected_other)),
+        fees_quote_atoms: summarize_u128(reports.iter().map(|report| report.fees_quote_atoms)),
+        taker_edge_quote_atoms: summarize_i128(
+            reports.iter().map(|report| report.taker_edge_quote_atoms),
+            paths,
+        ),
+        max_abs_inventory_imbalance_bps: summarize_u16(
+            reports
+                .iter()
+                .map(|report| report.max_abs_inventory_imbalance_bps),
         ),
     }
 }
@@ -325,12 +572,33 @@ fn summarize_i128(values: impl Iterator<Item = i128>, count_hint: u128) -> Summa
         count += 1;
     }
 
+    if count == 0 && count_hint == 0 {
+        return SummaryI128 {
+            min: 0,
+            mean: 0,
+            max: 0,
+        };
+    }
     let count = count.max(count_hint).max(1);
     SummaryI128 {
-        min: if count == 0 { 0 } else { min },
+        min,
         mean: sum / (count as i128),
         max: if max == i128::MIN { 0 } else { max },
     }
+}
+
+fn inventory_imbalance_abs_bps(base_inventory: u64, target_base_inventory: u64) -> u16 {
+    if target_base_inventory == 0 {
+        return u16::MAX;
+    }
+    let delta = (base_inventory as i128) - (target_base_inventory as i128);
+    let abs_delta = if delta < 0 {
+        delta.saturating_neg()
+    } else {
+        delta
+    };
+    let bps = (abs_delta * 10_000) / (target_base_inventory as i128);
+    bps.min(u16::MAX as i128) as u16
 }
 
 struct DeterministicRng {
@@ -509,5 +777,88 @@ mod tests {
         assert_eq!(report.trades_attempted.max, 0);
         assert_eq!(report.trades_filled.max, 0);
         assert_eq!(report.fill_rate_bps.max, 0);
+    }
+
+    #[test]
+    fn reference_quote_sim_tracks_age_rejections_and_inventory() {
+        let scenario = ReferenceQuoteScenario {
+            assumptions: assumptions(1),
+            initial_base_inventory: 1_000_000,
+            initial_quote_inventory: 30_000_000_000,
+            target_base_inventory: 1_000_000,
+            initial_mid_price: Q64x64::from_int(30_000),
+            maker_update_period_slots: 100,
+            params: reference_params(),
+        };
+        let events = [
+            FlowEvent {
+                slot: 1,
+                side: Side::BaseToQuote,
+                amount_in: 500,
+                fair_price: Q64x64::from_int(30_000),
+            },
+            FlowEvent {
+                slot: 13,
+                side: Side::BaseToQuote,
+                amount_in: 2_000,
+                fair_price: Q64x64::from_int(30_000),
+            },
+            FlowEvent {
+                slot: 21,
+                side: Side::BaseToQuote,
+                amount_in: 500,
+                fair_price: Q64x64::from_int(30_000),
+            },
+        ];
+
+        let report = simulate_reference_quote(scenario, &events).unwrap();
+        assert_eq!(report.trades_attempted, 3);
+        assert_eq!(report.trades_filled, 1);
+        assert_eq!(report.rejected_protected, 1);
+        assert_eq!(report.rejected_stale, 1);
+        assert_eq!(report.rejected_total(), 2);
+        assert!(report.max_abs_inventory_imbalance_bps > 0);
+    }
+
+    #[test]
+    fn generated_reference_quote_paths_are_deterministic() {
+        let scenario = GeneratedReferenceQuoteScenario {
+            assumptions: assumptions(8),
+            seed: 99,
+            slots_per_path: 100,
+            initial_base_inventory: 1_000_000,
+            initial_quote_inventory: 30_000_000_000,
+            target_base_inventory: 1_000_000,
+            initial_fair_price: Q64x64::from_int(30_000),
+            maker_update_period_slots: 6,
+            params: reference_params(),
+            volatility_bps_per_slot: 5,
+            drift_bps_per_slot: 0,
+            trade_probability_bps: 2_000,
+            max_trade_base_atoms: 1_000,
+        };
+
+        let left = simulate_generated_reference_quote(scenario).unwrap();
+        let right = simulate_generated_reference_quote(scenario).unwrap();
+        assert_eq!(left, right);
+        assert_eq!(left.paths, 8);
+        assert!(!left.is_single_path());
+    }
+
+    fn reference_params() -> ReferenceQuoteParams {
+        ReferenceQuoteParams {
+            fee_bps: 30,
+            base_half_spread_bps: 10,
+            aging_start_slots: 5,
+            protected_start_slots: 10,
+            expire_slots: 15,
+            aging_surcharge_bps_per_slot: 2,
+            max_aging_surcharge_bps: 20,
+            max_trade_base_atoms: 10_000,
+            protected_max_trade_base_atoms: 1_000,
+            inventory_skew_bps_per_10k_imbalance: 1_000,
+            max_inventory_skew_bps: 500,
+            hard_inventory_band_bps: 3_000,
+        }
     }
 }
