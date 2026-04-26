@@ -3,12 +3,13 @@ use std::{env, fs};
 use meta_amm_math::ReferenceQuoteParams;
 use meta_amm_math::{CpmmReserves, Q64x64};
 use meta_amm_sim::{
-    default_reference_quote_scenario_pack, parse_replay_csv, quote_update_policy_from_replay,
-    simulate_generated_cpmm, simulate_generated_reference_quote, simulate_reference_quote_replay,
-    simulate_reference_quote_scenario_pack, AggregateReport, FlowDistributionReport,
-    GeneratedCpmmScenario, GeneratedReferenceQuoteScenario, LandingDistributionReport,
-    QuoteUpdatePolicy, ReferenceQuoteAggregateReport, ReferenceQuoteReport, ReferenceQuoteScenario,
-    SameSlotUpdateOrder, ScenarioAssumptions, ScenarioPackReport, SummaryI128, SummaryU128,
+    default_reference_quote_scenario_pack, evaluate_scenario_pack, parse_replay_csv,
+    quote_update_policy_from_replay, simulate_generated_cpmm, simulate_generated_reference_quote,
+    simulate_reference_quote_replay, simulate_reference_quote_scenario_pack, AggregateReport,
+    FlowDistributionReport, GateFinding, GeneratedCpmmScenario, GeneratedReferenceQuoteScenario,
+    LandingDistributionReport, QuoteUpdatePolicy, ReferenceQuoteAggregateReport,
+    ReferenceQuoteReport, ReferenceQuoteScenario, SameSlotUpdateOrder, ScenarioAssumptions,
+    ScenarioGateThresholds, ScenarioPackEvaluation, ScenarioPackReport, SummaryI128, SummaryU128,
     SummaryU16, SummaryU64,
 };
 
@@ -96,11 +97,14 @@ fn run_scenario_pack() {
     let scenarios = default_reference_quote_scenario_pack(0x6d657461_616d6d5f_7061636b);
     let report =
         simulate_reference_quote_scenario_pack(&scenarios).expect("scenario pack should simulate");
+    let evaluation =
+        evaluate_scenario_pack(&report, ScenarioGateThresholds::reference_quote_default());
 
     println!("scenario_pack: default-reference-quote");
     println!("scenarios: {}", report.len());
+    println!("evaluation: {}", evaluation.severity().as_str());
     println!();
-    print_scenario_pack_report(&report);
+    print_scenario_pack_report(&report, &evaluation);
     println!("warning: scenario-pack output is generated, not market replay");
 }
 
@@ -215,15 +219,33 @@ fn print_reference_report(report: &ReferenceQuoteAggregateReport) {
     );
 }
 
-fn print_scenario_pack_report(report: &ScenarioPackReport) {
-    for scenario in &report.reports {
+fn print_scenario_pack_report(report: &ScenarioPackReport, evaluation: &ScenarioPackEvaluation) {
+    for (scenario, evaluation) in report.reports.iter().zip(evaluation.evaluations.iter()) {
         println!("scenario: {}", scenario.assumptions.name);
         println!("flow_model: {}", scenario.assumptions.flow_model);
         println!("landing_model: {}", scenario.assumptions.landing_model);
         println!("paths: {}", scenario.paths);
+        println!("evaluation: {}", evaluation.severity.as_str());
+        if evaluation.findings.is_empty() {
+            println!("gate_findings: none");
+        } else {
+            for finding in &evaluation.findings {
+                print_gate_finding(finding);
+            }
+        }
         print_reference_report(scenario);
         println!();
     }
+}
+
+fn print_gate_finding(finding: &GateFinding) {
+    println!(
+        "gate_finding: severity={} metric={} observed={} threshold={}",
+        finding.severity.as_str(),
+        finding.metric,
+        finding.observed,
+        finding.threshold
+    );
 }
 
 fn print_reference_single_report(report: &ReferenceQuoteReport) {

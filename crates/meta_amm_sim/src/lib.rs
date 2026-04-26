@@ -279,6 +279,100 @@ impl ScenarioPackReport {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum GateSeverity {
+    Pass,
+    Warn,
+    Block,
+}
+
+impl GateSeverity {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Warn => "warn",
+            Self::Block => "block",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScenarioGateThresholds {
+    pub min_paths: u32,
+    pub warn_min_p05_fill_rate_bps: u16,
+    pub block_min_p05_fill_rate_bps: u16,
+    pub warn_max_p95_stale_reject_rate_bps: u16,
+    pub block_max_p95_stale_reject_rate_bps: u16,
+    pub warn_max_p95_protected_reject_rate_bps: u16,
+    pub block_max_p95_protected_reject_rate_bps: u16,
+    pub warn_max_p95_update_drop_rate_bps: u16,
+    pub block_max_p95_update_drop_rate_bps: u16,
+    pub warn_max_p95_quote_age_slots: u64,
+    pub block_max_p95_quote_age_slots: u64,
+    pub warn_max_p95_inventory_imbalance_bps: u16,
+    pub block_max_p95_inventory_imbalance_bps: u16,
+}
+
+impl ScenarioGateThresholds {
+    pub const fn reference_quote_default() -> Self {
+        Self {
+            min_paths: 32,
+            warn_min_p05_fill_rate_bps: 7_000,
+            block_min_p05_fill_rate_bps: 5_000,
+            warn_max_p95_stale_reject_rate_bps: 1_500,
+            block_max_p95_stale_reject_rate_bps: 2_500,
+            warn_max_p95_protected_reject_rate_bps: 2_000,
+            block_max_p95_protected_reject_rate_bps: 3_500,
+            warn_max_p95_update_drop_rate_bps: 2_500,
+            block_max_p95_update_drop_rate_bps: 3_500,
+            warn_max_p95_quote_age_slots: 32,
+            block_max_p95_quote_age_slots: 40,
+            warn_max_p95_inventory_imbalance_bps: 2_000,
+            block_max_p95_inventory_imbalance_bps: 2_800,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateFinding {
+    pub severity: GateSeverity,
+    pub metric: &'static str,
+    pub observed: u64,
+    pub threshold: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioEvaluation {
+    pub scenario_name: &'static str,
+    pub severity: GateSeverity,
+    pub findings: Vec<GateFinding>,
+}
+
+impl ScenarioEvaluation {
+    pub fn passes(&self) -> bool {
+        self.severity == GateSeverity::Pass
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioPackEvaluation {
+    pub evaluations: Vec<ScenarioEvaluation>,
+}
+
+impl ScenarioPackEvaluation {
+    pub fn severity(&self) -> GateSeverity {
+        self.evaluations
+            .iter()
+            .map(|evaluation| evaluation.severity)
+            .max()
+            .unwrap_or(GateSeverity::Pass)
+    }
+
+    pub fn passes(&self) -> bool {
+        self.severity() == GateSeverity::Pass
+    }
+}
+
 pub fn simulate_cpmm(scenario: CpmmScenario, events: &[FlowEvent]) -> Result<SimReport, MathError> {
     let mut reserves = scenario.initial_reserves;
     let mut report = SimReport {
@@ -569,6 +663,91 @@ pub fn simulate_reference_quote_scenario_pack(
         reports.push(simulate_generated_reference_quote(*scenario)?);
     }
     Ok(ScenarioPackReport { reports })
+}
+
+pub fn evaluate_reference_quote_report(
+    report: &ReferenceQuoteAggregateReport,
+    thresholds: ScenarioGateThresholds,
+) -> ScenarioEvaluation {
+    let mut findings = Vec::new();
+
+    if report.paths < thresholds.min_paths {
+        findings.push(GateFinding {
+            severity: GateSeverity::Block,
+            metric: "paths",
+            observed: report.paths as u64,
+            threshold: thresholds.min_paths as u64,
+        });
+    }
+    push_min_gate(
+        &mut findings,
+        "fill_rate_p05_bps",
+        report.fill_rate_bps.p05 as u64,
+        thresholds.warn_min_p05_fill_rate_bps as u64,
+        thresholds.block_min_p05_fill_rate_bps as u64,
+    );
+    push_max_gate(
+        &mut findings,
+        "stale_reject_rate_p95_bps",
+        rate_bps(report.rejected_stale.p95, report.trades_attempted.p95) as u64,
+        thresholds.warn_max_p95_stale_reject_rate_bps as u64,
+        thresholds.block_max_p95_stale_reject_rate_bps as u64,
+    );
+    push_max_gate(
+        &mut findings,
+        "protected_reject_rate_p95_bps",
+        rate_bps(report.rejected_protected.p95, report.trades_attempted.p95) as u64,
+        thresholds.warn_max_p95_protected_reject_rate_bps as u64,
+        thresholds.block_max_p95_protected_reject_rate_bps as u64,
+    );
+    push_max_gate(
+        &mut findings,
+        "update_drop_rate_p95_bps",
+        rate_bps(
+            report.quote_updates_dropped.p95,
+            report.quote_updates_sent.p95,
+        ) as u64,
+        thresholds.warn_max_p95_update_drop_rate_bps as u64,
+        thresholds.block_max_p95_update_drop_rate_bps as u64,
+    );
+    push_max_gate(
+        &mut findings,
+        "max_quote_age_p95_slots",
+        report.max_quote_age_slots.p95,
+        thresholds.warn_max_p95_quote_age_slots,
+        thresholds.block_max_p95_quote_age_slots,
+    );
+    push_max_gate(
+        &mut findings,
+        "inventory_imbalance_p95_bps",
+        report.max_abs_inventory_imbalance_bps.p95 as u64,
+        thresholds.warn_max_p95_inventory_imbalance_bps as u64,
+        thresholds.block_max_p95_inventory_imbalance_bps as u64,
+    );
+
+    let severity = findings
+        .iter()
+        .map(|finding| finding.severity)
+        .max()
+        .unwrap_or(GateSeverity::Pass);
+    ScenarioEvaluation {
+        scenario_name: report.assumptions.name,
+        severity,
+        findings,
+    }
+}
+
+pub fn evaluate_scenario_pack(
+    report: &ScenarioPackReport,
+    thresholds: ScenarioGateThresholds,
+) -> ScenarioPackEvaluation {
+    ScenarioPackEvaluation {
+        evaluations: report
+            .reports
+            .iter()
+            .map(|report| evaluate_reference_quote_report(report, thresholds))
+            .collect(),
+    }
 }
 
 pub fn default_reference_quote_scenario_pack(seed: u128) -> [GeneratedReferenceQuoteScenario; 3] {
@@ -1104,6 +1283,61 @@ fn percentile_i128(values: &[i128], percentile: u32) -> i128 {
     values[percentile_index(values.len(), percentile)]
 }
 
+fn push_min_gate(
+    findings: &mut Vec<GateFinding>,
+    metric: &'static str,
+    observed: u64,
+    warn_threshold: u64,
+    block_threshold: u64,
+) {
+    if observed < block_threshold {
+        findings.push(GateFinding {
+            severity: GateSeverity::Block,
+            metric,
+            observed,
+            threshold: block_threshold,
+        });
+    } else if observed < warn_threshold {
+        findings.push(GateFinding {
+            severity: GateSeverity::Warn,
+            metric,
+            observed,
+            threshold: warn_threshold,
+        });
+    }
+}
+
+fn push_max_gate(
+    findings: &mut Vec<GateFinding>,
+    metric: &'static str,
+    observed: u64,
+    warn_threshold: u64,
+    block_threshold: u64,
+) {
+    if observed > block_threshold {
+        findings.push(GateFinding {
+            severity: GateSeverity::Block,
+            metric,
+            observed,
+            threshold: block_threshold,
+        });
+    } else if observed > warn_threshold {
+        findings.push(GateFinding {
+            severity: GateSeverity::Warn,
+            metric,
+            observed,
+            threshold: warn_threshold,
+        });
+    }
+}
+
+fn rate_bps(numerator: u64, denominator: u64) -> u16 {
+    if denominator == 0 {
+        return 0;
+    }
+    ((numerator.saturating_mul(10_000)) / denominator).min(u16::MAX as u64) as u16
+}
+
 fn inventory_imbalance_abs_bps(base_inventory: u64, target_base_inventory: u64) -> u16 {
     if target_base_inventory == 0 {
         return u16::MAX;
@@ -1395,6 +1629,29 @@ mod tests {
             left.reports[0].fill_rate_bps.mean > left.reports[2].fill_rate_bps.mean,
             "calm scenario should fill more reliably than volatile dropped-update scenario"
         );
+    }
+
+    #[test]
+    fn scenario_pack_evaluation_surfaces_warnings_and_blockers() {
+        let scenarios = default_reference_quote_scenario_pack(0x6d657461_616d6d5f_7061636b);
+        let report = simulate_reference_quote_scenario_pack(&scenarios).unwrap();
+        let evaluation =
+            evaluate_scenario_pack(&report, ScenarioGateThresholds::reference_quote_default());
+
+        assert_eq!(evaluation.severity(), GateSeverity::Block);
+        assert!(evaluation.evaluations[0].passes());
+        assert_eq!(evaluation.evaluations[1].severity, GateSeverity::Warn);
+        assert_eq!(evaluation.evaluations[2].severity, GateSeverity::Block);
+        assert!(evaluation.evaluations[2]
+            .findings
+            .iter()
+            .any(|finding| finding.metric == "fill_rate_p05_bps"
+                && finding.severity == GateSeverity::Block));
+        assert!(evaluation.evaluations[2]
+            .findings
+            .iter()
+            .any(|finding| finding.metric == "update_drop_rate_p95_bps"
+                && finding.severity == GateSeverity::Block));
     }
 
     #[test]

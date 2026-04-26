@@ -84,6 +84,8 @@ seeded update drops, same-slot update/swap ordering, stale/protected rejects,
 and max quote age. It is useful for checking report plumbing and failure-mode
 visibility, not for claiming maker edge. Multi-path summaries include
 min/p05/mean/p50/p95/max so tails are visible in generated scenario packs.
+Scenario packs also emit pass/warn/block safety gates for fill rate, stale and
+protected rejects, update drops, quote age, and inventory drift.
 
 Replay CSV rows use this minimal schema:
 
