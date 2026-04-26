@@ -15,7 +15,7 @@ use meta_amm_sim::{
 };
 
 fn main() {
-    if calibrate_reference_requested() {
+    if calibrate_reference_requested() || export_best_config_requested() {
         run_reference_calibration();
         return;
     }
@@ -115,7 +115,7 @@ fn run_scenario_pack() {
 
 fn run_reference_calibration() {
     let report = calibrate_reference_quote(
-        0x6d657461_616d6d5f_63616c,
+        0x006d_6574_6161_6d6d_5f63_616c,
         ScenarioGateThresholds::reference_quote_default(),
     )
     .expect("reference calibration should simulate");
@@ -129,6 +129,13 @@ fn run_reference_calibration() {
     println!();
     print_calibration_report(&report);
     println!("warning: calibration output is generated search plumbing, not market proof");
+    if export_best_config_requested() {
+        if let Some(config) = report.export_best_config() {
+            println!();
+            println!("config_export:");
+            print!("{config}");
+        }
+    }
 }
 
 fn run_replay_csv(path: &str) {
@@ -200,6 +207,10 @@ fn calibrate_reference_requested() -> bool {
     env::args()
         .skip(1)
         .any(|arg| arg == "--calibrate-reference")
+}
+
+fn export_best_config_requested() -> bool {
+    env::args().skip(1).any(|arg| arg == "--export-best-config")
 }
 
 fn reference_params() -> ReferenceQuoteParams {
