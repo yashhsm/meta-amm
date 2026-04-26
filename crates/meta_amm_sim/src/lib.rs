@@ -227,29 +227,56 @@ impl AggregateReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SummaryU16 {
     pub min: u16,
+    pub p05: u16,
     pub mean: u16,
+    pub p50: u16,
+    pub p95: u16,
     pub max: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SummaryU64 {
     pub min: u64,
+    pub p05: u64,
     pub mean: u64,
+    pub p50: u64,
+    pub p95: u64,
     pub max: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SummaryU128 {
     pub min: u128,
+    pub p05: u128,
     pub mean: u128,
+    pub p50: u128,
+    pub p95: u128,
     pub max: u128,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SummaryI128 {
     pub min: i128,
+    pub p05: i128,
     pub mean: i128,
+    pub p50: i128,
+    pub p95: i128,
     pub max: i128,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioPackReport {
+    pub reports: Vec<ReferenceQuoteAggregateReport>,
+}
+
+impl ScenarioPackReport {
+    pub fn len(&self) -> usize {
+        self.reports.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.reports.is_empty()
+    }
 }
 
 pub fn simulate_cpmm(scenario: CpmmScenario, events: &[FlowEvent]) -> Result<SimReport, MathError> {
@@ -532,6 +559,99 @@ pub fn simulate_generated_reference_quote(
     }
 
     Ok(aggregate_reference_reports(scenario.assumptions, &reports))
+}
+
+pub fn simulate_reference_quote_scenario_pack(
+    scenarios: &[GeneratedReferenceQuoteScenario],
+) -> Result<ScenarioPackReport, MathError> {
+    let mut reports = Vec::with_capacity(scenarios.len());
+    for scenario in scenarios {
+        reports.push(simulate_generated_reference_quote(*scenario)?);
+    }
+    Ok(ScenarioPackReport { reports })
+}
+
+pub fn default_reference_quote_scenario_pack(seed: u128) -> [GeneratedReferenceQuoteScenario; 3] {
+    let base_params = ReferenceQuoteParams {
+        fee_bps: 30,
+        base_half_spread_bps: 10,
+        aging_start_slots: 5,
+        protected_start_slots: 10,
+        expire_slots: 15,
+        aging_surcharge_bps_per_slot: 2,
+        max_aging_surcharge_bps: 20,
+        max_trade_base_atoms: 10_000,
+        protected_max_trade_base_atoms: 500,
+        inventory_skew_bps_per_10k_imbalance: 1_000,
+        max_inventory_skew_bps: 500,
+        hard_inventory_band_bps: 3_000,
+    };
+    let base = GeneratedReferenceQuoteScenario {
+        assumptions: ScenarioAssumptions {
+            name: "calm-fast-updates",
+            flow_model: "seeded random walk fair price with Bernoulli flow",
+            landing_model: "fast deterministic maker updates",
+            path_count: 64,
+        },
+        seed,
+        slots_per_path: 1_000,
+        initial_base_inventory: 1_000_000,
+        initial_quote_inventory: 30_000_000_000,
+        target_base_inventory: 1_000_000,
+        initial_fair_price: Q64x64::from_int(30_000),
+        quote_update_policy: QuoteUpdatePolicy {
+            maker_update_period_slots: 4,
+            landing_latency_slots: 1,
+            update_success_probability_bps: 9_900,
+            failure_seed: seed ^ 0x616c6d5f66617374,
+            same_slot_order: SameSlotUpdateOrder::SwapBeforeUpdate,
+        },
+        params: base_params,
+        volatility_bps_per_slot: 3,
+        drift_bps_per_slot: 0,
+        trade_probability_bps: 1_500,
+        max_trade_base_atoms: 1_000,
+    };
+
+    let mut trending = base;
+    trending.assumptions = ScenarioAssumptions {
+        name: "trending-slow-updates",
+        flow_model: "positive drift fair price with Bernoulli flow",
+        landing_model: "slow maker updates with same-slot swap precedence",
+        path_count: 64,
+    };
+    trending.seed = seed ^ 0x7472656e64696e67;
+    trending.quote_update_policy = QuoteUpdatePolicy {
+        maker_update_period_slots: 9,
+        landing_latency_slots: 4,
+        update_success_probability_bps: 8_500,
+        failure_seed: seed ^ 0x7472656e645f6c616e64,
+        same_slot_order: SameSlotUpdateOrder::SwapBeforeUpdate,
+    };
+    trending.volatility_bps_per_slot = 7;
+    trending.drift_bps_per_slot = 2;
+    trending.trade_probability_bps = 2_000;
+
+    let mut volatile = base;
+    volatile.assumptions = ScenarioAssumptions {
+        name: "volatile-dropped-updates",
+        flow_model: "high-volatility random walk with Bernoulli flow",
+        landing_model: "dropped quote updates and long landing latency",
+        path_count: 64,
+    };
+    volatile.seed = seed ^ 0x766f6c6174696c65;
+    volatile.quote_update_policy = QuoteUpdatePolicy {
+        maker_update_period_slots: 8,
+        landing_latency_slots: 6,
+        update_success_probability_bps: 6_500,
+        failure_seed: seed ^ 0x766f6c5f64726f70,
+        same_slot_order: SameSlotUpdateOrder::SwapBeforeUpdate,
+    };
+    volatile.volatility_bps_per_slot = 18;
+    volatile.trade_probability_bps = 2_500;
+    volatile.max_trade_base_atoms = 1_500;
+
+    [base, trending, volatile]
 }
 
 pub fn generate_flow_path(
@@ -845,91 +965,143 @@ fn aggregate_reference_reports(
 }
 
 fn summarize_u16(values: impl Iterator<Item = u16>) -> SummaryU16 {
-    let mut min = u16::MAX;
-    let mut max = 0u16;
-    let mut sum = 0u128;
-    let mut count = 0u128;
-
-    for value in values {
-        min = min.min(value);
-        max = max.max(value);
-        sum += value as u128;
-        count += 1;
+    let mut values: Vec<u16> = values.collect();
+    if values.is_empty() {
+        return SummaryU16 {
+            min: 0,
+            p05: 0,
+            mean: 0,
+            p50: 0,
+            p95: 0,
+            max: 0,
+        };
     }
+    values.sort_unstable();
+    let mut sum = 0u128;
+    for value in &values {
+        sum += *value as u128;
+    }
+    let count = values.len() as u128;
 
     SummaryU16 {
-        min: if count == 0 { 0 } else { min },
-        mean: if count == 0 { 0 } else { (sum / count) as u16 },
-        max,
+        min: values[0],
+        p05: percentile_u16(&values, 5),
+        mean: (sum / count) as u16,
+        p50: percentile_u16(&values, 50),
+        p95: percentile_u16(&values, 95),
+        max: values[values.len() - 1],
     }
 }
 
 fn summarize_u64(values: impl Iterator<Item = u64>) -> SummaryU64 {
-    let mut min = u64::MAX;
-    let mut max = 0u64;
-    let mut sum = 0u128;
-    let mut count = 0u128;
-
-    for value in values {
-        min = min.min(value);
-        max = max.max(value);
-        sum += value as u128;
-        count += 1;
+    let mut values: Vec<u64> = values.collect();
+    if values.is_empty() {
+        return SummaryU64 {
+            min: 0,
+            p05: 0,
+            mean: 0,
+            p50: 0,
+            p95: 0,
+            max: 0,
+        };
     }
+    values.sort_unstable();
+    let mut sum = 0u128;
+    for value in &values {
+        sum += *value as u128;
+    }
+    let count = values.len() as u128;
 
     SummaryU64 {
-        min: if count == 0 { 0 } else { min },
-        mean: if count == 0 { 0 } else { (sum / count) as u64 },
-        max,
+        min: values[0],
+        p05: percentile_u64(&values, 5),
+        mean: (sum / count) as u64,
+        p50: percentile_u64(&values, 50),
+        p95: percentile_u64(&values, 95),
+        max: values[values.len() - 1],
     }
 }
 
 fn summarize_u128(values: impl Iterator<Item = u128>) -> SummaryU128 {
-    let mut min = u128::MAX;
-    let mut max = 0u128;
-    let mut sum = 0u128;
-    let mut count = 0u128;
-
-    for value in values {
-        min = min.min(value);
-        max = max.max(value);
-        sum = sum.saturating_add(value);
-        count += 1;
+    let mut values: Vec<u128> = values.collect();
+    if values.is_empty() {
+        return SummaryU128 {
+            min: 0,
+            p05: 0,
+            mean: 0,
+            p50: 0,
+            p95: 0,
+            max: 0,
+        };
     }
+    values.sort_unstable();
+    let mut sum = 0u128;
+    for value in &values {
+        sum = sum.saturating_add(*value);
+    }
+    let count = values.len() as u128;
 
     SummaryU128 {
-        min: if count == 0 { 0 } else { min },
-        mean: if count == 0 { 0 } else { sum / count },
-        max,
+        min: values[0],
+        p05: percentile_u128(&values, 5),
+        mean: sum / count,
+        p50: percentile_u128(&values, 50),
+        p95: percentile_u128(&values, 95),
+        max: values[values.len() - 1],
     }
 }
 
 fn summarize_i128(values: impl Iterator<Item = i128>, count_hint: u128) -> SummaryI128 {
-    let mut min = i128::MAX;
-    let mut max = i128::MIN;
-    let mut sum = 0i128;
-    let mut count = 0u128;
-
-    for value in values {
-        min = min.min(value);
-        max = max.max(value);
-        sum = sum.saturating_add(value);
-        count += 1;
-    }
-
-    if count == 0 && count_hint == 0 {
+    let mut values: Vec<i128> = values.collect();
+    if values.is_empty() {
         return SummaryI128 {
             min: 0,
+            p05: 0,
             mean: 0,
+            p50: 0,
+            p95: 0,
             max: 0,
         };
     }
-    let count = count.max(count_hint).max(1);
-    SummaryI128 {
-        min,
-        mean: sum / (count as i128),
-        max: if max == i128::MIN { 0 } else { max },
+    values.sort_unstable();
+    let mut sum = 0i128;
+    for value in &values {
+        sum = sum.saturating_add(*value);
     }
+    let observed_count = values.len() as u128;
+    let count = observed_count.max(count_hint).max(1);
+    SummaryI128 {
+        min: values[0],
+        p05: percentile_i128(&values, 5),
+        mean: sum / (count as i128),
+        p50: percentile_i128(&values, 50),
+        p95: percentile_i128(&values, 95),
+        max: values[values.len() - 1],
+    }
+}
+
+fn percentile_index(len: usize, percentile: u32) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let last = len - 1;
+    ((last as u128) * (percentile as u128) / 100) as usize
+}
+
+fn percentile_u16(values: &[u16], percentile: u32) -> u16 {
+    values[percentile_index(values.len(), percentile)]
+}
+
+fn percentile_u64(values: &[u64], percentile: u32) -> u64 {
+    values[percentile_index(values.len(), percentile)]
+}
+
+fn percentile_u128(values: &[u128], percentile: u32) -> u128 {
+    values[percentile_index(values.len(), percentile)]
+}
+
+fn percentile_i128(values: &[i128], percentile: u32) -> i128 {
+    values[percentile_index(values.len(), percentile)]
 }
 
 fn inventory_imbalance_abs_bps(base_inventory: u64, target_base_inventory: u64) -> u16 {
@@ -1188,6 +1360,41 @@ mod tests {
         assert_eq!(left, right);
         assert_eq!(left.paths, 8);
         assert!(!left.is_single_path());
+    }
+
+    #[test]
+    fn summary_reports_quantiles_without_hiding_extremes() {
+        let summary = summarize_u64((1u64..=20).map(|value| value * 10));
+        assert_eq!(summary.min, 10);
+        assert_eq!(summary.p05, 10);
+        assert_eq!(summary.mean, 105);
+        assert_eq!(summary.p50, 100);
+        assert_eq!(summary.p95, 190);
+        assert_eq!(summary.max, 200);
+
+        let signed = summarize_i128([-30, -10, 0, 10, 30].into_iter(), 0);
+        assert_eq!(signed.min, -30);
+        assert_eq!(signed.p50, 0);
+        assert_eq!(signed.max, 30);
+    }
+
+    #[test]
+    fn default_reference_quote_scenario_pack_is_deterministic() {
+        let scenarios = default_reference_quote_scenario_pack(55);
+        assert_eq!(scenarios.len(), 3);
+        assert_eq!(scenarios[0].assumptions.name, "calm-fast-updates");
+        assert_eq!(scenarios[1].assumptions.name, "trending-slow-updates");
+        assert_eq!(scenarios[2].assumptions.name, "volatile-dropped-updates");
+
+        let left = simulate_reference_quote_scenario_pack(&scenarios).unwrap();
+        let right = simulate_reference_quote_scenario_pack(&scenarios).unwrap();
+        assert_eq!(left, right);
+        assert_eq!(left.len(), 3);
+        assert!(left.reports.iter().all(|report| report.paths == 64));
+        assert!(
+            left.reports[0].fill_rate_bps.mean > left.reports[2].fill_rate_bps.mean,
+            "calm scenario should fill more reliably than volatile dropped-update scenario"
+        );
     }
 
     #[test]

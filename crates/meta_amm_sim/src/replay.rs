@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use meta_amm_math::{MathError, Q64x64};
 
-use crate::{FlowOrder, MarketSlot, QuoteUpdatePolicy, SameSlotUpdateOrder, Side, SummaryU64};
+use crate::{
+    summarize_u64, FlowOrder, MarketSlot, QuoteUpdatePolicy, SameSlotUpdateOrder, Side, SummaryU64,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayMarketPath {
@@ -130,9 +132,7 @@ pub fn flow_distribution(path: &ReplayMarketPath) -> Result<FlowDistributionRepo
     let mut trades = 0u64;
     let mut base_to_quote_trades = 0u64;
     let mut quote_to_base_trades = 0u64;
-    let mut min_amount = u64::MAX;
-    let mut max_amount = 0u64;
-    let mut sum_amount = 0u128;
+    let mut base_equivalent_amounts = Vec::new();
 
     for slot in &path.slots {
         let Some(flow) = slot.flow else {
@@ -149,9 +149,7 @@ pub fn flow_distribution(path: &ReplayMarketPath) -> Result<FlowDistributionRepo
                 slot.fair_price.div_amount_floor(flow.amount_in)?
             }
         };
-        min_amount = min_amount.min(base_equivalent);
-        max_amount = max_amount.max(base_equivalent);
-        sum_amount = sum_amount.saturating_add(base_equivalent as u128);
+        base_equivalent_amounts.push(base_equivalent);
     }
 
     Ok(FlowDistributionReport {
@@ -160,15 +158,7 @@ pub fn flow_distribution(path: &ReplayMarketPath) -> Result<FlowDistributionRepo
         trade_probability_bps: bps(trades, path.slots.len() as u64),
         base_to_quote_trades,
         quote_to_base_trades,
-        base_equivalent_amount: SummaryU64 {
-            min: if trades == 0 { 0 } else { min_amount },
-            mean: if trades == 0 {
-                0
-            } else {
-                (sum_amount / (trades as u128)) as u64
-            },
-            max: max_amount,
-        },
+        base_equivalent_amount: summarize_u64(base_equivalent_amounts.into_iter()),
     })
 }
 
@@ -176,18 +166,13 @@ pub fn landing_distribution(path: &ReplayMarketPath) -> LandingDistributionRepor
     let sent = path.quote_updates.len() as u64;
     let mut landed = 0u64;
     let mut dropped = 0u64;
-    let mut min_latency = u64::MAX;
-    let mut max_latency = 0u64;
-    let mut sum_latency = 0u128;
+    let mut latencies = Vec::new();
 
     for update in &path.quote_updates {
         match update.landing_slot {
             Some(landing_slot) => {
                 landed += 1;
-                let latency = landing_slot.saturating_sub(update.publish_slot);
-                min_latency = min_latency.min(latency);
-                max_latency = max_latency.max(latency);
-                sum_latency = sum_latency.saturating_add(latency as u128);
+                latencies.push(landing_slot.saturating_sub(update.publish_slot));
             }
             None => dropped += 1,
         }
@@ -198,15 +183,7 @@ pub fn landing_distribution(path: &ReplayMarketPath) -> LandingDistributionRepor
         quote_updates_landed: landed,
         quote_updates_dropped: dropped,
         success_probability_bps: bps(landed, sent),
-        latency_slots: SummaryU64 {
-            min: if landed == 0 { 0 } else { min_latency },
-            mean: if landed == 0 {
-                0
-            } else {
-                (sum_latency / (landed as u128)) as u64
-            },
-            max: max_latency,
-        },
+        latency_slots: summarize_u64(latencies.into_iter()),
     }
 }
 

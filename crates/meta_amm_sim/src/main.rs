@@ -3,14 +3,20 @@ use std::{env, fs};
 use meta_amm_math::ReferenceQuoteParams;
 use meta_amm_math::{CpmmReserves, Q64x64};
 use meta_amm_sim::{
-    parse_replay_csv, quote_update_policy_from_replay, simulate_generated_cpmm,
-    simulate_generated_reference_quote, simulate_reference_quote_replay, AggregateReport,
-    FlowDistributionReport, GeneratedCpmmScenario, GeneratedReferenceQuoteScenario,
-    LandingDistributionReport, QuoteUpdatePolicy, ReferenceQuoteAggregateReport,
-    ReferenceQuoteReport, ReferenceQuoteScenario, SameSlotUpdateOrder, ScenarioAssumptions,
+    default_reference_quote_scenario_pack, parse_replay_csv, quote_update_policy_from_replay,
+    simulate_generated_cpmm, simulate_generated_reference_quote, simulate_reference_quote_replay,
+    simulate_reference_quote_scenario_pack, AggregateReport, FlowDistributionReport,
+    GeneratedCpmmScenario, GeneratedReferenceQuoteScenario, LandingDistributionReport,
+    QuoteUpdatePolicy, ReferenceQuoteAggregateReport, ReferenceQuoteReport, ReferenceQuoteScenario,
+    SameSlotUpdateOrder, ScenarioAssumptions, ScenarioPackReport, SummaryI128, SummaryU128,
+    SummaryU16, SummaryU64,
 };
 
 fn main() {
+    if scenario_pack_requested() {
+        run_scenario_pack();
+        return;
+    }
     if let Some(path) = replay_csv_path_arg() {
         run_replay_csv(&path);
         return;
@@ -86,6 +92,18 @@ fn run_generated_smoke() {
     println!("warning: generated smoke output is not market replay or maker edge");
 }
 
+fn run_scenario_pack() {
+    let scenarios = default_reference_quote_scenario_pack(0x6d657461_616d6d5f_7061636b);
+    let report =
+        simulate_reference_quote_scenario_pack(&scenarios).expect("scenario pack should simulate");
+
+    println!("scenario_pack: default-reference-quote");
+    println!("scenarios: {}", report.len());
+    println!();
+    print_scenario_pack_report(&report);
+    println!("warning: scenario-pack output is generated, not market replay");
+}
+
 fn run_replay_csv(path: &str) {
     let input = fs::read_to_string(path).expect("replay CSV should be readable");
     let replay = parse_replay_csv(&input).expect("replay CSV should parse");
@@ -147,6 +165,10 @@ fn replay_csv_path_arg() -> Option<String> {
     None
 }
 
+fn scenario_pack_requested() -> bool {
+    env::args().skip(1).any(|arg| arg == "--scenario-pack")
+}
+
 fn reference_params() -> ReferenceQuoteParams {
     ReferenceQuoteParams {
         fee_bps: 30,
@@ -166,100 +188,42 @@ fn reference_params() -> ReferenceQuoteParams {
 
 fn print_cpmm_report(report: &AggregateReport) {
     println!("engine: CPMM");
-    println!(
-        "trades_attempted: min={} mean={} max={}",
-        report.trades_attempted.min, report.trades_attempted.mean, report.trades_attempted.max
-    );
-    println!(
-        "trades_filled: min={} mean={} max={}",
-        report.trades_filled.min, report.trades_filled.mean, report.trades_filled.max
-    );
-    println!(
-        "fill_rate_bps: min={} mean={} max={}",
-        report.fill_rate_bps.min, report.fill_rate_bps.mean, report.fill_rate_bps.max
-    );
-    println!(
-        "fees_quote_atoms: min={} mean={} max={}",
-        report.fees_quote_atoms.min, report.fees_quote_atoms.mean, report.fees_quote_atoms.max
-    );
-    println!(
-        "taker_edge_quote_atoms: min={} mean={} max={}",
-        report.taker_edge_quote_atoms.min,
-        report.taker_edge_quote_atoms.mean,
-        report.taker_edge_quote_atoms.max
-    );
+    print_summary_u64("trades_attempted", &report.trades_attempted);
+    print_summary_u64("trades_filled", &report.trades_filled);
+    print_summary_u16("fill_rate_bps", &report.fill_rate_bps);
+    print_summary_u128("fees_quote_atoms", &report.fees_quote_atoms);
+    print_summary_i128("taker_edge_quote_atoms", &report.taker_edge_quote_atoms);
 }
 
 fn print_reference_report(report: &ReferenceQuoteAggregateReport) {
     println!("engine: ReferenceQuote");
-    println!(
-        "trades_attempted: min={} mean={} max={}",
-        report.trades_attempted.min, report.trades_attempted.mean, report.trades_attempted.max
+    print_summary_u64("trades_attempted", &report.trades_attempted);
+    print_summary_u64("trades_filled", &report.trades_filled);
+    print_summary_u16("fill_rate_bps", &report.fill_rate_bps);
+    print_summary_u64("rejected_stale", &report.rejected_stale);
+    print_summary_u64("rejected_protected", &report.rejected_protected);
+    print_summary_u64("rejected_inventory", &report.rejected_inventory);
+    print_summary_u64("quote_updates_sent", &report.quote_updates_sent);
+    print_summary_u64("quote_updates_landed", &report.quote_updates_landed);
+    print_summary_u64("quote_updates_dropped", &report.quote_updates_dropped);
+    print_summary_u64("max_quote_age_slots", &report.max_quote_age_slots);
+    print_summary_u128("fees_quote_atoms", &report.fees_quote_atoms);
+    print_summary_i128("taker_edge_quote_atoms", &report.taker_edge_quote_atoms);
+    print_summary_u16(
+        "max_abs_inventory_imbalance_bps",
+        &report.max_abs_inventory_imbalance_bps,
     );
-    println!(
-        "trades_filled: min={} mean={} max={}",
-        report.trades_filled.min, report.trades_filled.mean, report.trades_filled.max
-    );
-    println!(
-        "fill_rate_bps: min={} mean={} max={}",
-        report.fill_rate_bps.min, report.fill_rate_bps.mean, report.fill_rate_bps.max
-    );
-    println!(
-        "rejected_stale: min={} mean={} max={}",
-        report.rejected_stale.min, report.rejected_stale.mean, report.rejected_stale.max
-    );
-    println!(
-        "rejected_protected: min={} mean={} max={}",
-        report.rejected_protected.min,
-        report.rejected_protected.mean,
-        report.rejected_protected.max
-    );
-    println!(
-        "rejected_inventory: min={} mean={} max={}",
-        report.rejected_inventory.min,
-        report.rejected_inventory.mean,
-        report.rejected_inventory.max
-    );
-    println!(
-        "quote_updates_sent: min={} mean={} max={}",
-        report.quote_updates_sent.min,
-        report.quote_updates_sent.mean,
-        report.quote_updates_sent.max
-    );
-    println!(
-        "quote_updates_landed: min={} mean={} max={}",
-        report.quote_updates_landed.min,
-        report.quote_updates_landed.mean,
-        report.quote_updates_landed.max
-    );
-    println!(
-        "quote_updates_dropped: min={} mean={} max={}",
-        report.quote_updates_dropped.min,
-        report.quote_updates_dropped.mean,
-        report.quote_updates_dropped.max
-    );
-    println!(
-        "max_quote_age_slots: min={} mean={} max={}",
-        report.max_quote_age_slots.min,
-        report.max_quote_age_slots.mean,
-        report.max_quote_age_slots.max
-    );
-    println!(
-        "fees_quote_atoms: min={} mean={} max={}",
-        report.fees_quote_atoms.min, report.fees_quote_atoms.mean, report.fees_quote_atoms.max
-    );
-    println!(
-        "taker_edge_quote_atoms: min={} mean={} max={}",
-        report.taker_edge_quote_atoms.min,
-        report.taker_edge_quote_atoms.mean,
-        report.taker_edge_quote_atoms.max
-    );
-    println!(
-        "max_abs_inventory_imbalance_bps: min={} mean={} max={}",
-        report.max_abs_inventory_imbalance_bps.min,
-        report.max_abs_inventory_imbalance_bps.mean,
-        report.max_abs_inventory_imbalance_bps.max
-    );
+}
+
+fn print_scenario_pack_report(report: &ScenarioPackReport) {
+    for scenario in &report.reports {
+        println!("scenario: {}", scenario.assumptions.name);
+        println!("flow_model: {}", scenario.assumptions.flow_model);
+        println!("landing_model: {}", scenario.assumptions.landing_model);
+        println!("paths: {}", scenario.paths);
+        print_reference_report(scenario);
+        println!();
+    }
 }
 
 fn print_reference_single_report(report: &ReferenceQuoteReport) {
@@ -289,12 +253,7 @@ fn print_flow_distribution(report: &FlowDistributionReport) {
     println!("trade_probability_bps: {}", report.trade_probability_bps);
     println!("base_to_quote_trades: {}", report.base_to_quote_trades);
     println!("quote_to_base_trades: {}", report.quote_to_base_trades);
-    println!(
-        "base_equivalent_amount: min={} mean={} max={}",
-        report.base_equivalent_amount.min,
-        report.base_equivalent_amount.mean,
-        report.base_equivalent_amount.max
-    );
+    print_summary_u64("base_equivalent_amount", &report.base_equivalent_amount);
 }
 
 fn print_landing_distribution(report: &LandingDistributionReport) {
@@ -306,8 +265,33 @@ fn print_landing_distribution(report: &LandingDistributionReport) {
         "success_probability_bps: {}",
         report.success_probability_bps
     );
+    print_summary_u64("latency_slots", &report.latency_slots);
+}
+
+fn print_summary_u16(label: &str, summary: &SummaryU16) {
     println!(
-        "latency_slots: min={} mean={} max={}",
-        report.latency_slots.min, report.latency_slots.mean, report.latency_slots.max
+        "{}: min={} p05={} mean={} p50={} p95={} max={}",
+        label, summary.min, summary.p05, summary.mean, summary.p50, summary.p95, summary.max
+    );
+}
+
+fn print_summary_u64(label: &str, summary: &SummaryU64) {
+    println!(
+        "{}: min={} p05={} mean={} p50={} p95={} max={}",
+        label, summary.min, summary.p05, summary.mean, summary.p50, summary.p95, summary.max
+    );
+}
+
+fn print_summary_u128(label: &str, summary: &SummaryU128) {
+    println!(
+        "{}: min={} p05={} mean={} p50={} p95={} max={}",
+        label, summary.min, summary.p05, summary.mean, summary.p50, summary.p95, summary.max
+    );
+}
+
+fn print_summary_i128(label: &str, summary: &SummaryI128) {
+    println!(
+        "{}: min={} p05={} mean={} p50={} p95={} max={}",
+        label, summary.min, summary.p05, summary.mean, summary.p50, summary.p95, summary.max
     );
 }
