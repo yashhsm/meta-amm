@@ -2,15 +2,15 @@ use meta_amm_math::ReferenceQuoteParams;
 use meta_amm_math::{CpmmReserves, Q64x64};
 use meta_amm_sim::{
     simulate_generated_cpmm, simulate_generated_reference_quote, AggregateReport,
-    GeneratedCpmmScenario, GeneratedReferenceQuoteScenario, ReferenceQuoteAggregateReport,
-    ScenarioAssumptions,
+    GeneratedCpmmScenario, GeneratedReferenceQuoteScenario, QuoteUpdatePolicy,
+    ReferenceQuoteAggregateReport, SameSlotUpdateOrder, ScenarioAssumptions,
 };
 
 fn main() {
     let assumptions = ScenarioAssumptions {
         name: "generated-smoke",
         flow_model: "seeded random walk fair price with Bernoulli flow",
-        landing_model: "instant deterministic landing",
+        landing_model: "deterministic quote latency with seeded update drops",
         path_count: 32,
     };
     let seed = 0x6d657461_616d6d5f_736d6f6b_65000001;
@@ -44,7 +44,13 @@ fn main() {
         initial_quote_inventory: 30_000_000_000,
         target_base_inventory: 1_000_000,
         initial_fair_price,
-        maker_update_period_slots: 6,
+        quote_update_policy: QuoteUpdatePolicy {
+            maker_update_period_slots: 8,
+            landing_latency_slots: 5,
+            update_success_probability_bps: 7_500,
+            failure_seed: seed ^ 0x71756f74655f757064617465,
+            same_slot_order: SameSlotUpdateOrder::SwapBeforeUpdate,
+        },
         params: ReferenceQuoteParams {
             fee_bps: 30,
             base_half_spread_bps: 10,
@@ -136,6 +142,30 @@ fn print_reference_report(report: &ReferenceQuoteAggregateReport) {
         report.rejected_inventory.min,
         report.rejected_inventory.mean,
         report.rejected_inventory.max
+    );
+    println!(
+        "quote_updates_sent: min={} mean={} max={}",
+        report.quote_updates_sent.min,
+        report.quote_updates_sent.mean,
+        report.quote_updates_sent.max
+    );
+    println!(
+        "quote_updates_landed: min={} mean={} max={}",
+        report.quote_updates_landed.min,
+        report.quote_updates_landed.mean,
+        report.quote_updates_landed.max
+    );
+    println!(
+        "quote_updates_dropped: min={} mean={} max={}",
+        report.quote_updates_dropped.min,
+        report.quote_updates_dropped.mean,
+        report.quote_updates_dropped.max
+    );
+    println!(
+        "max_quote_age_slots: min={} mean={} max={}",
+        report.max_quote_age_slots.min,
+        report.max_quote_age_slots.mean,
+        report.max_quote_age_slots.max
     );
     println!(
         "fees_quote_atoms: min={} mean={} max={}",

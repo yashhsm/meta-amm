@@ -77,5 +77,7 @@ cargo run -p meta_amm_sim --quiet
 ```
 
 The current simulator binary is a deterministic multi-path smoke scenario for
-CPMM and ReferenceQuote. It is useful for checking report plumbing, not for
-claiming maker edge.
+CPMM and ReferenceQuote. ReferenceQuote now models quote landing latency,
+seeded update drops, same-slot update/swap ordering, stale/protected rejects,
+and max quote age. It is useful for checking report plumbing and failure-mode
+visibility, not for claiming maker edge.
