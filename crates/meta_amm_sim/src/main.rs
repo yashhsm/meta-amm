@@ -1,52 +1,59 @@
 use meta_amm_math::{CpmmReserves, Q64x64};
-use meta_amm_sim::{simulate_cpmm, CpmmScenario, FlowEvent, ScenarioAssumptions, Side};
+use meta_amm_sim::{simulate_generated_cpmm, GeneratedCpmmScenario, ScenarioAssumptions};
 
 fn main() {
-    let scenario = CpmmScenario {
+    let scenario = GeneratedCpmmScenario {
         assumptions: ScenarioAssumptions {
-            name: "cpmm-smoke",
-            flow_model: "deterministic fixture",
+            name: "cpmm-generated-smoke",
+            flow_model: "seeded random walk fair price with Bernoulli flow",
             landing_model: "instant deterministic landing",
-            path_count: 1,
+            path_count: 32,
         },
+        seed: 0x6d657461_616d6d5f_736d6f6b_65000001,
+        slots_per_path: 1_000,
         initial_reserves: CpmmReserves {
             base: 1_000_000,
             quote: 30_000_000_000,
         },
+        initial_fair_price: Q64x64::from_int(30_000),
         fee_bps: 30,
+        volatility_bps_per_slot: 5,
+        drift_bps_per_slot: 0,
+        trade_probability_bps: 1_500,
+        max_trade_base_atoms: 1_000,
     };
 
-    let events = [
-        FlowEvent {
-            slot: 1,
-            side: Side::BaseToQuote,
-            amount_in: 1_000,
-            fair_price: Q64x64::from_int(30_000),
-        },
-        FlowEvent {
-            slot: 2,
-            side: Side::QuoteToBase,
-            amount_in: 30_000_000,
-            fair_price: Q64x64::from_int(30_000),
-        },
-    ];
-
-    let report = simulate_cpmm(scenario, &events).expect("smoke scenario should simulate");
+    let report = simulate_generated_cpmm(scenario).expect("smoke scenario should simulate");
 
     println!("scenario: {}", report.assumptions.name);
     println!("flow_model: {}", report.assumptions.flow_model);
     println!("landing_model: {}", report.assumptions.landing_model);
-    println!("path_count: {}", report.assumptions.path_count);
-    println!("trades_attempted: {}", report.trades_attempted);
-    println!("trades_filled: {}", report.trades_filled);
-    println!("fill_rate_bps: {}", report.fill_rate_bps());
-    println!("fees_quote_atoms: {}", report.fees_quote_atoms);
-    println!("taker_edge_quote_atoms: {}", report.taker_edge_quote_atoms);
+    println!("paths: {}", report.paths);
     println!(
-        "final_reserves: base={} quote={}",
-        report.final_reserves.base, report.final_reserves.quote
+        "trades_attempted: min={} mean={} max={}",
+        report.trades_attempted.min, report.trades_attempted.mean, report.trades_attempted.max
+    );
+    println!(
+        "trades_filled: min={} mean={} max={}",
+        report.trades_filled.min, report.trades_filled.mean, report.trades_filled.max
+    );
+    println!(
+        "fill_rate_bps: min={} mean={} max={}",
+        report.fill_rate_bps.min, report.fill_rate_bps.mean, report.fill_rate_bps.max
+    );
+    println!(
+        "fees_quote_atoms: min={} mean={} max={}",
+        report.fees_quote_atoms.min, report.fees_quote_atoms.mean, report.fees_quote_atoms.max
+    );
+    println!(
+        "taker_edge_quote_atoms: min={} mean={} max={}",
+        report.taker_edge_quote_atoms.min,
+        report.taker_edge_quote_atoms.mean,
+        report.taker_edge_quote_atoms.max
     );
     if report.is_single_path() {
-        println!("warning: single-path smoke output is not expected maker edge");
+        println!("warning: single-path output is not expected maker edge");
+    } else {
+        println!("warning: generated smoke output is not market replay or maker edge");
     }
 }

@@ -68,3 +68,13 @@ docs/
 tests/
   golden/
 ```
+
+## Development
+
+```sh
+cargo test
+cargo run -p meta_amm_sim --quiet
+```
+
+The current simulator binary is a deterministic multi-path CPMM smoke scenario.
+It is useful for checking report plumbing, not for claiming maker edge.
