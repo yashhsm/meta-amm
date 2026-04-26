@@ -3,6 +3,10 @@ use meta_amm_math::{
     ReferenceQuoteParams, ReferenceQuoteState,
 };
 
+mod replay;
+
+pub use replay::*;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
     BaseToQuote,
@@ -401,48 +405,97 @@ pub fn simulate_reference_quote_market_path(
             .max_quote_age_slots
             .max(state.now_slot.saturating_sub(state.mid_publish_slot));
 
-        if let Some(flow) = slot.flow {
-            report.trades_attempted += 1;
-            let event = FlowEvent {
-                slot: slot.slot,
-                side: flow.side,
-                amount_in: flow.amount_in,
-                fair_price: slot.fair_price,
-            };
-            let base_to_quote = matches!(flow.side, Side::BaseToQuote);
-            match reference_quote_exact_in(state, scenario.params, flow.amount_in, base_to_quote) {
-                Ok(quote) => {
-                    report.trades_filled += 1;
-                    match quote.age_state {
-                        QuoteAgeState::Fresh => report.fresh_fills += 1,
-                        QuoteAgeState::Aging => report.aging_fills += 1,
-                        QuoteAgeState::Protected => report.protected_fills += 1,
-                        QuoteAgeState::Expired | QuoteAgeState::Paused => {}
-                    }
-                    report.fees_quote_atoms = report
-                        .fees_quote_atoms
-                        .saturating_add(fee_in_quote_atoms(&event, quote.amount_in_less_fee)?);
-                    report.taker_edge_quote_atoms = report
-                        .taker_edge_quote_atoms
-                        .saturating_add(taker_edge_quote_atoms(&event, quote.amount_out)?);
-                    state.base_inventory = quote.new_base_inventory;
-                    state.quote_inventory = quote.new_quote_inventory;
-                    report.max_abs_inventory_imbalance_bps = report
-                        .max_abs_inventory_imbalance_bps
-                        .max(inventory_imbalance_abs_bps(
-                            state.base_inventory,
-                            state.target_base_inventory,
-                        ));
-                }
-                Err(MathError::StaleQuote) => report.rejected_stale += 1,
-                Err(MathError::QuoteProtected) => report.rejected_protected += 1,
-                Err(MathError::InventoryBand) => report.rejected_inventory += 1,
-                Err(MathError::InvalidAmount) | Err(MathError::EmptyLiquidity) => {
-                    report.rejected_other += 1;
-                }
-                Err(error) => return Err(error),
+        execute_reference_quote_slot(&mut report, &mut state, scenario.params, *slot)?;
+
+        if scenario.quote_update_policy.same_slot_order == SameSlotUpdateOrder::SwapBeforeUpdate {
+            report.quote_updates_landed +=
+                apply_landed_quote_updates(&mut state, &mut pending_updates, slot.slot);
+        }
+    }
+
+    report.final_base_inventory = state.base_inventory;
+    report.final_quote_inventory = state.quote_inventory;
+    Ok(report)
+}
+
+pub fn simulate_reference_quote_replay(
+    scenario: ReferenceQuoteScenario,
+    replay: &ReplayMarketPath,
+) -> Result<ReferenceQuoteReport, MathError> {
+    validate_quote_update_policy(scenario.quote_update_policy)?;
+    validate_quote_updates(&replay.quote_updates)?;
+    let mut state = ReferenceQuoteState {
+        base_inventory: scenario.initial_base_inventory,
+        quote_inventory: scenario.initial_quote_inventory,
+        target_base_inventory: scenario.target_base_inventory,
+        mid_price: scenario.initial_mid_price,
+        mid_publish_slot: 0,
+        now_slot: 0,
+        paused: false,
+    };
+    let mut report = ReferenceQuoteReport {
+        assumptions: scenario.assumptions,
+        trades_attempted: 0,
+        trades_filled: 0,
+        rejected_stale: 0,
+        rejected_protected: 0,
+        rejected_inventory: 0,
+        rejected_other: 0,
+        quote_updates_sent: 0,
+        quote_updates_landed: 0,
+        quote_updates_dropped: 0,
+        max_quote_age_slots: 0,
+        fresh_fills: 0,
+        aging_fills: 0,
+        protected_fills: 0,
+        fees_quote_atoms: 0,
+        taker_edge_quote_atoms: 0,
+        final_base_inventory: state.base_inventory,
+        final_quote_inventory: state.quote_inventory,
+        max_abs_inventory_imbalance_bps: inventory_imbalance_abs_bps(
+            state.base_inventory,
+            state.target_base_inventory,
+        ),
+    };
+    let mut pending_updates = Vec::new();
+    let mut update_index = 0usize;
+    let mut previous_slot = None;
+
+    for slot in &replay.slots {
+        if let Some(previous_slot) = previous_slot {
+            if slot.slot < previous_slot {
+                return Err(MathError::InvalidConfig);
             }
         }
+        previous_slot = Some(slot.slot);
+
+        while let Some(update) = replay.quote_updates.get(update_index) {
+            if update.publish_slot > slot.slot {
+                break;
+            }
+            report.quote_updates_sent += 1;
+            match update.landing_slot {
+                Some(landing_slot) => pending_updates.push(PendingQuoteUpdate {
+                    publish_slot: update.publish_slot,
+                    landing_slot,
+                    mid_price: update.mid_price,
+                }),
+                None => report.quote_updates_dropped += 1,
+            }
+            update_index += 1;
+        }
+
+        let land_through_before_swap = match scenario.quote_update_policy.same_slot_order {
+            SameSlotUpdateOrder::UpdateBeforeSwap => slot.slot,
+            SameSlotUpdateOrder::SwapBeforeUpdate => slot.slot.saturating_sub(1),
+        };
+        report.quote_updates_landed +=
+            apply_landed_quote_updates(&mut state, &mut pending_updates, land_through_before_swap);
+        state.now_slot = slot.slot;
+        report.max_quote_age_slots = report
+            .max_quote_age_slots
+            .max(state.now_slot.saturating_sub(state.mid_publish_slot));
+        execute_reference_quote_slot(&mut report, &mut state, scenario.params, *slot)?;
 
         if scenario.quote_update_policy.same_slot_order == SameSlotUpdateOrder::SwapBeforeUpdate {
             report.quote_updates_landed +=
@@ -643,6 +696,80 @@ fn apply_landed_quote_updates(
     }
 
     landed
+}
+
+fn execute_reference_quote_slot(
+    report: &mut ReferenceQuoteReport,
+    state: &mut ReferenceQuoteState,
+    params: ReferenceQuoteParams,
+    slot: MarketSlot,
+) -> Result<(), MathError> {
+    let Some(flow) = slot.flow else {
+        return Ok(());
+    };
+
+    report.trades_attempted += 1;
+    let event = FlowEvent {
+        slot: slot.slot,
+        side: flow.side,
+        amount_in: flow.amount_in,
+        fair_price: slot.fair_price,
+    };
+    let base_to_quote = matches!(flow.side, Side::BaseToQuote);
+    match reference_quote_exact_in(*state, params, flow.amount_in, base_to_quote) {
+        Ok(quote) => {
+            report.trades_filled += 1;
+            match quote.age_state {
+                QuoteAgeState::Fresh => report.fresh_fills += 1,
+                QuoteAgeState::Aging => report.aging_fills += 1,
+                QuoteAgeState::Protected => report.protected_fills += 1,
+                QuoteAgeState::Expired | QuoteAgeState::Paused => {}
+            }
+            report.fees_quote_atoms = report
+                .fees_quote_atoms
+                .saturating_add(fee_in_quote_atoms(&event, quote.amount_in_less_fee)?);
+            report.taker_edge_quote_atoms = report
+                .taker_edge_quote_atoms
+                .saturating_add(taker_edge_quote_atoms(&event, quote.amount_out)?);
+            state.base_inventory = quote.new_base_inventory;
+            state.quote_inventory = quote.new_quote_inventory;
+            report.max_abs_inventory_imbalance_bps =
+                report
+                    .max_abs_inventory_imbalance_bps
+                    .max(inventory_imbalance_abs_bps(
+                        state.base_inventory,
+                        state.target_base_inventory,
+                    ));
+        }
+        Err(MathError::StaleQuote) => report.rejected_stale += 1,
+        Err(MathError::QuoteProtected) => report.rejected_protected += 1,
+        Err(MathError::InventoryBand) => report.rejected_inventory += 1,
+        Err(MathError::InvalidAmount) | Err(MathError::EmptyLiquidity) => {
+            report.rejected_other += 1;
+        }
+        Err(error) => return Err(error),
+    }
+
+    Ok(())
+}
+
+fn validate_quote_updates(updates: &[QuoteUpdateEvent]) -> Result<(), MathError> {
+    let mut previous_publish_slot = None;
+    for update in updates {
+        if let Some(previous_publish_slot) = previous_publish_slot {
+            if update.publish_slot < previous_publish_slot {
+                return Err(MathError::InvalidConfig);
+            }
+        }
+        if update
+            .landing_slot
+            .is_some_and(|landing_slot| landing_slot < update.publish_slot)
+        {
+            return Err(MathError::InvalidConfig);
+        }
+        previous_publish_slot = Some(update.publish_slot);
+    }
+    Ok(())
 }
 
 fn update_integer_price(
@@ -1170,6 +1297,96 @@ mod tests {
 
         assert_eq!(
             simulate_reference_quote_market_path(scenario, &slots),
+            Err(MathError::InvalidConfig)
+        );
+    }
+
+    #[test]
+    fn replay_csv_parses_distributions_and_exact_update_outcomes() {
+        let replay =
+            parse_replay_csv(include_str!("../../../tests/fixtures/reference-replay.csv")).unwrap();
+        assert_eq!(replay.slots.len(), 10);
+        assert_eq!(replay.quote_updates.len(), 3);
+
+        let flow = replay.flow_distribution().unwrap();
+        assert_eq!(flow.observations, 10);
+        assert_eq!(flow.trades, 6);
+        assert_eq!(flow.trade_probability_bps, 6_000);
+        assert_eq!(flow.base_to_quote_trades, 5);
+        assert_eq!(flow.quote_to_base_trades, 1);
+        assert!(flow.base_equivalent_amount.mean > 0);
+
+        let landing = replay.landing_distribution();
+        assert_eq!(landing.quote_updates_sent, 3);
+        assert_eq!(landing.quote_updates_landed, 2);
+        assert_eq!(landing.quote_updates_dropped, 1);
+        assert_eq!(landing.success_probability_bps, 6_666);
+        assert_eq!(landing.latency_slots.min, 2);
+        assert_eq!(landing.latency_slots.max, 2);
+
+        let policy =
+            quote_update_policy_from_replay(&replay, SameSlotUpdateOrder::SwapBeforeUpdate, 11)
+                .unwrap();
+        assert_eq!(policy.maker_update_period_slots, 3);
+        assert_eq!(policy.landing_latency_slots, 2);
+        assert_eq!(policy.update_success_probability_bps, 6_666);
+
+        let report = simulate_reference_quote_replay(
+            ReferenceQuoteScenario {
+                assumptions: assumptions(1),
+                initial_base_inventory: 1_000_000,
+                initial_quote_inventory: 30_000_000_000,
+                target_base_inventory: 1_000_000,
+                initial_mid_price: replay.first_fair_price().unwrap(),
+                quote_update_policy: policy,
+                params: reference_params(),
+            },
+            &replay,
+        )
+        .unwrap();
+
+        assert_eq!(report.trades_attempted, flow.trades);
+        assert_eq!(report.quote_updates_sent, landing.quote_updates_sent);
+        assert_eq!(report.quote_updates_landed, landing.quote_updates_landed);
+        assert_eq!(report.quote_updates_dropped, landing.quote_updates_dropped);
+        assert!(report.trades_filled > 0);
+    }
+
+    #[test]
+    fn replay_rejects_unsorted_quote_updates() {
+        let replay = ReplayMarketPath {
+            slots: vec![MarketSlot {
+                slot: 4,
+                fair_price: Q64x64::from_int(30_000),
+                flow: None,
+            }],
+            quote_updates: vec![
+                QuoteUpdateEvent {
+                    publish_slot: 3,
+                    landing_slot: Some(4),
+                    mid_price: Q64x64::from_int(30_000),
+                },
+                QuoteUpdateEvent {
+                    publish_slot: 2,
+                    landing_slot: Some(4),
+                    mid_price: Q64x64::from_int(30_000),
+                },
+            ],
+        };
+
+        assert_eq!(
+            simulate_reference_quote_replay(
+                ReferenceQuoteScenario {
+                    assumptions: assumptions(1),
+                    initial_base_inventory: 1_000_000,
+                    initial_quote_inventory: 30_000_000_000,
+                    target_base_inventory: 1_000_000,
+                    initial_mid_price: Q64x64::from_int(30_000),
+                    quote_update_policy: QuoteUpdatePolicy::instant(1),
+                    params: reference_params(),
+                },
+                &replay,
+            ),
             Err(MathError::InvalidConfig)
         );
     }

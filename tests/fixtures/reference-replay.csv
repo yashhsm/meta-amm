@@ -1,0 +1,11 @@
+slot,fair_price,side,amount_in,quote_landing_slot
+0,30000,,,
+1,30010,base_to_quote,500,
+2,30020,,,4
+3,30030,base_to_quote,500,
+4,30040,quote_to_base,15020000,
+6,30050,,,drop
+8,30060,,,10
+9,30070,base_to_quote,400,
+16,30080,base_to_quote,400,
+24,30090,base_to_quote,400,

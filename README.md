@@ -74,6 +74,7 @@ tests/
 ```sh
 cargo test
 cargo run -p meta_amm_sim --quiet
+cargo run -p meta_amm_sim --quiet -- --replay-csv tests/fixtures/reference-replay.csv
 ```
 
 The current simulator binary is a deterministic multi-path smoke scenario for
@@ -81,3 +82,12 @@ CPMM and ReferenceQuote. ReferenceQuote now models quote landing latency,
 seeded update drops, same-slot update/swap ordering, stale/protected rejects,
 and max quote age. It is useful for checking report plumbing and failure-mode
 visibility, not for claiming maker edge.
+
+Replay CSV rows use this minimal schema:
+
+```text
+slot,fair_price,side,amount_in,quote_landing_slot
+```
+
+`side` and `amount_in` are optional per row. `quote_landing_slot` is optional;
+use an integer landing slot for landed updates or `drop` for failed updates.
