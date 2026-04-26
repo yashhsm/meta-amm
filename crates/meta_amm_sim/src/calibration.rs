@@ -1,11 +1,12 @@
 use std::fmt::Write;
 
+use meta_amm_config::{QuoteUpdateEnvelope, ReferenceQuoteStrategyConfig, SameSlotUpdateOrder};
 use meta_amm_math::{MathError, ReferenceQuoteParams};
 
 use crate::{
     default_reference_quote_scenario_pack, evaluate_scenario_pack,
     simulate_reference_quote_scenario_pack, GeneratedReferenceQuoteScenario, QuoteUpdatePolicy,
-    SameSlotUpdateOrder, ScenarioGateThresholds, ScenarioPackEvaluation, ScenarioPackReport,
+    ScenarioGateThresholds, ScenarioPackEvaluation, ScenarioPackReport,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,20 +45,6 @@ impl ReferenceQuoteCalibrationReport {
     pub fn export_best_config(&self) -> Option<String> {
         self.best().map(export_reference_quote_config)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ReferenceQuoteStrategyConfig {
-    pub params: ReferenceQuoteParams,
-    pub quote_update_envelope: QuoteUpdateEnvelope,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct QuoteUpdateEnvelope {
-    pub max_maker_update_period_slots: u64,
-    pub max_landing_latency_slots: u64,
-    pub min_update_success_probability_bps: u16,
-    pub same_slot_order: SameSlotUpdateOrder,
 }
 
 pub fn calibrate_reference_quote(
@@ -513,6 +500,10 @@ fn write_json_string(out: &mut String, value: &str) {
 mod tests {
     use super::*;
     use crate::GateSeverity;
+    use meta_amm_config::{
+        compile_reference_quote_config, AccountBudget, ReferenceQuoteConfigInput,
+        REFERENCE_QUOTE_MODE_ID,
+    };
 
     #[test]
     fn calibration_candidates_are_sorted_by_gate_then_fill_tail() {
@@ -567,11 +558,44 @@ mod tests {
     }
 
     #[test]
+    fn best_calibration_candidate_compiles_to_bounded_config() {
+        let report =
+            calibrate_reference_quote(77, ScenarioGateThresholds::reference_quote_default())
+                .unwrap();
+        let best = report.best().unwrap();
+
+        let compiled = compile_reference_quote_config(ReferenceQuoteConfigInput {
+            strategy: best.strategy_config,
+            token_pair: token_pair(),
+            account_budget: AccountBudget::reference_quote_jupiter_default(),
+        })
+        .unwrap();
+
+        assert_eq!(compiled.mode.as_u8(), REFERENCE_QUOTE_MODE_ID);
+        assert_eq!(compiled.params, best.strategy_config.params);
+        assert_eq!(
+            compiled.quote_update_envelope,
+            best.strategy_config.quote_update_envelope
+        );
+    }
+
+    #[test]
     fn json_string_writer_escapes_control_characters() {
         let mut out = String::new();
 
         write_json_string(&mut out, "name \"quoted\" \\ path\nnext\tcell");
 
         assert_eq!(out, "\"name \\\"quoted\\\" \\\\ path\\nnext\\tcell\"");
+    }
+
+    fn token_pair() -> meta_amm_config::TokenPairIdentity {
+        meta_amm_config::TokenPairIdentity {
+            base_mint: [1; 32],
+            quote_mint: [2; 32],
+            base_token_program: [3; 32],
+            quote_token_program: [4; 32],
+            base_decimals: 8,
+            quote_decimals: 6,
+        }
     }
 }

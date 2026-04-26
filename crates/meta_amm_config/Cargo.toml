@@ -1,10 +1,9 @@
 [package]
-name = "meta_amm_sim"
+name = "meta_amm_config"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-meta_amm_config.workspace = true
 meta_amm_math.workspace = true
 
 [lib]

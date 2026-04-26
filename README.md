@@ -54,6 +54,7 @@ The selected design is a hybrid configurable maker kernel:
 ```text
 Cargo.toml
 crates/
+  meta_amm_config/
   meta_amm_math/
   meta_amm_sim/
 docs/
@@ -92,6 +93,9 @@ Reference calibration searches a small generated candidate set and ranks
 candidates by safety gate severity first, then fill-tail and rough maker score.
 The best generated calibration candidate can be exported as a deterministic
 ReferenceQuote config handoff with the assumptions and gate findings attached.
+The config crate compiles that typed strategy into a bounded ReferenceQuote
+config, validating bps ranges, quote-refresh envelope, account budget, and the
+canonical decimal-scale preimage before any on-chain compiler consumes it.
 
 Replay CSV rows use this minimal schema:
 

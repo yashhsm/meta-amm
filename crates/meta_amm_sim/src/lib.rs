@@ -3,6 +3,8 @@ use meta_amm_math::{
     ReferenceQuoteParams, ReferenceQuoteState,
 };
 
+pub use meta_amm_config::{QuoteUpdateEnvelope, ReferenceQuoteStrategyConfig, SameSlotUpdateOrder};
+
 mod calibration;
 mod replay;
 
@@ -34,12 +36,6 @@ pub struct MarketSlot {
     pub slot: u64,
     pub fair_price: Q64x64,
     pub flow: Option<FlowOrder>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SameSlotUpdateOrder {
-    UpdateBeforeSwap,
-    SwapBeforeUpdate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
