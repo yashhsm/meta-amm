@@ -75,6 +75,7 @@ tests/
 cargo test
 cargo run -p meta_amm_sim --quiet
 cargo run -p meta_amm_sim --quiet -- --scenario-pack
+cargo run -p meta_amm_sim --quiet -- --calibrate-reference
 cargo run -p meta_amm_sim --quiet -- --replay-csv tests/fixtures/reference-replay.csv
 ```
 
@@ -86,6 +87,8 @@ visibility, not for claiming maker edge. Multi-path summaries include
 min/p05/mean/p50/p95/max so tails are visible in generated scenario packs.
 Scenario packs also emit pass/warn/block safety gates for fill rate, stale and
 protected rejects, update drops, quote age, and inventory drift.
+Reference calibration searches a small generated candidate set and ranks
+candidates by safety gate severity first, then fill-tail and rough maker score.
 
 Replay CSV rows use this minimal schema:
 

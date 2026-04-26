@@ -3,17 +3,22 @@ use std::{env, fs};
 use meta_amm_math::ReferenceQuoteParams;
 use meta_amm_math::{CpmmReserves, Q64x64};
 use meta_amm_sim::{
-    default_reference_quote_scenario_pack, evaluate_scenario_pack, parse_replay_csv,
-    quote_update_policy_from_replay, simulate_generated_cpmm, simulate_generated_reference_quote,
-    simulate_reference_quote_replay, simulate_reference_quote_scenario_pack, AggregateReport,
+    calibrate_reference_quote, default_reference_quote_scenario_pack, evaluate_scenario_pack,
+    parse_replay_csv, quote_update_policy_from_replay, simulate_generated_cpmm,
+    simulate_generated_reference_quote, simulate_reference_quote_replay,
+    simulate_reference_quote_scenario_pack, AggregateReport, CalibrationCandidateReport,
     FlowDistributionReport, GateFinding, GeneratedCpmmScenario, GeneratedReferenceQuoteScenario,
     LandingDistributionReport, QuoteUpdatePolicy, ReferenceQuoteAggregateReport,
-    ReferenceQuoteReport, ReferenceQuoteScenario, SameSlotUpdateOrder, ScenarioAssumptions,
-    ScenarioGateThresholds, ScenarioPackEvaluation, ScenarioPackReport, SummaryI128, SummaryU128,
-    SummaryU16, SummaryU64,
+    ReferenceQuoteCalibrationReport, ReferenceQuoteReport, ReferenceQuoteScenario,
+    SameSlotUpdateOrder, ScenarioAssumptions, ScenarioGateThresholds, ScenarioPackEvaluation,
+    ScenarioPackReport, SummaryI128, SummaryU128, SummaryU16, SummaryU64,
 };
 
 fn main() {
+    if calibrate_reference_requested() {
+        run_reference_calibration();
+        return;
+    }
     if scenario_pack_requested() {
         run_scenario_pack();
         return;
@@ -108,6 +113,24 @@ fn run_scenario_pack() {
     println!("warning: scenario-pack output is generated, not market replay");
 }
 
+fn run_reference_calibration() {
+    let report = calibrate_reference_quote(
+        0x6d657461_616d6d5f_63616c,
+        ScenarioGateThresholds::reference_quote_default(),
+    )
+    .expect("reference calibration should simulate");
+
+    println!("calibration: reference-quote-generated");
+    println!("candidates: {}", report.candidates.len());
+    if let Some(best) = report.best() {
+        println!("best_candidate: {}", best.candidate_name);
+        println!("best_evaluation: {}", best.evaluation.severity().as_str());
+    }
+    println!();
+    print_calibration_report(&report);
+    println!("warning: calibration output is generated search plumbing, not market proof");
+}
+
 fn run_replay_csv(path: &str) {
     let input = fs::read_to_string(path).expect("replay CSV should be readable");
     let replay = parse_replay_csv(&input).expect("replay CSV should parse");
@@ -173,6 +196,12 @@ fn scenario_pack_requested() -> bool {
     env::args().skip(1).any(|arg| arg == "--scenario-pack")
 }
 
+fn calibrate_reference_requested() -> bool {
+    env::args()
+        .skip(1)
+        .any(|arg| arg == "--calibrate-reference")
+}
+
 fn reference_params() -> ReferenceQuoteParams {
     ReferenceQuoteParams {
         fee_bps: 30,
@@ -236,6 +265,45 @@ fn print_scenario_pack_report(report: &ScenarioPackReport, evaluation: &Scenario
         print_reference_report(scenario);
         println!();
     }
+}
+
+fn print_calibration_report(report: &ReferenceQuoteCalibrationReport) {
+    for candidate in &report.candidates {
+        print_calibration_candidate(candidate);
+    }
+}
+
+fn print_calibration_candidate(candidate: &CalibrationCandidateReport) {
+    println!("candidate: {}", candidate.candidate_name);
+    println!("evaluation: {}", candidate.evaluation.severity().as_str());
+    println!(
+        "score: mean_p05_fill_rate_bps={} mean_fill_rate_bps={} mean_update_drop_rate_bps={} rough_maker_score_quote_atoms={}",
+        candidate.score.mean_p05_fill_rate_bps,
+        candidate.score.mean_fill_rate_bps,
+        candidate.score.mean_update_drop_rate_bps,
+        candidate.score.rough_maker_score_quote_atoms
+    );
+    for evaluation in &candidate.evaluation.evaluations {
+        if evaluation.findings.is_empty() {
+            println!(
+                "scenario_gate: scenario={} severity={} findings=none",
+                evaluation.scenario_name,
+                evaluation.severity.as_str()
+            );
+        } else {
+            for finding in &evaluation.findings {
+                println!(
+                    "scenario_gate: scenario={} severity={} metric={} observed={} threshold={}",
+                    evaluation.scenario_name,
+                    finding.severity.as_str(),
+                    finding.metric,
+                    finding.observed,
+                    finding.threshold
+                );
+            }
+        }
+    }
+    println!();
 }
 
 fn print_gate_finding(finding: &GateFinding) {
