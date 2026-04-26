@@ -1,0 +1,16 @@
+[workspace]
+members = [
+    "crates/meta_amm_math",
+    "crates/meta_amm_sim",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.dependencies]
+meta_amm_math = { path = "crates/meta_amm_math" }
