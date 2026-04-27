@@ -9,6 +9,8 @@ use crate::{
     ScenarioGateThresholds, ScenarioPackEvaluation, ScenarioPackReport,
 };
 
+pub const DEFAULT_REFERENCE_QUOTE_CALIBRATION_SEED: u128 = 0x006d_6574_6161_6d6d_5f63_616c;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReferenceQuoteCalibrationCandidate {
     pub name: &'static str,
@@ -505,6 +507,9 @@ mod tests {
         REFERENCE_QUOTE_MODE_ID,
     };
 
+    const GOLDEN_REFERENCE_QUOTE_CONFIG_EXPORT: &str =
+        include_str!("../../../tests/golden/reference-quote-config-export.json");
+
     #[test]
     fn calibration_candidates_are_sorted_by_gate_then_fill_tail() {
         let report =
@@ -526,13 +531,16 @@ mod tests {
 
     #[test]
     fn calibration_export_carries_config_gates_and_assumptions() {
-        let report =
-            calibrate_reference_quote(77, ScenarioGateThresholds::reference_quote_default())
-                .unwrap();
+        let report = calibrate_reference_quote(
+            DEFAULT_REFERENCE_QUOTE_CALIBRATION_SEED,
+            ScenarioGateThresholds::reference_quote_default(),
+        )
+        .unwrap();
         let best = report.best().unwrap();
         let export = export_reference_quote_config(best);
 
         assert_eq!(report.export_best_config().unwrap(), export);
+        assert_eq!(export, GOLDEN_REFERENCE_QUOTE_CONFIG_EXPORT);
         assert!(
             best.strategy_config
                 .quote_update_envelope

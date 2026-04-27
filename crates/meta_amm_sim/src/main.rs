@@ -12,6 +12,7 @@ use meta_amm_sim::{
     ReferenceQuoteCalibrationReport, ReferenceQuoteReport, ReferenceQuoteScenario,
     SameSlotUpdateOrder, ScenarioAssumptions, ScenarioGateThresholds, ScenarioPackEvaluation,
     ScenarioPackReport, SummaryI128, SummaryU128, SummaryU16, SummaryU64,
+    DEFAULT_REFERENCE_QUOTE_CALIBRATION_SEED,
 };
 
 fn main() {
@@ -115,7 +116,7 @@ fn run_scenario_pack() {
 
 fn run_reference_calibration() {
     let report = calibrate_reference_quote(
-        0x006d_6574_6161_6d6d_5f63_616c,
+        DEFAULT_REFERENCE_QUOTE_CALIBRATION_SEED,
         ScenarioGateThresholds::reference_quote_default(),
     )
     .expect("reference calibration should simulate");

@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "mode": "ReferenceQuote",
+  "candidate_name": "faster-updates",
+  "warning": "generated calibration output; not market replay or maker edge",
+  "params": {
+    "fee_bps": 30,
+    "base_half_spread_bps": 10,
+    "aging_start_slots": 5,
+    "protected_start_slots": 10,
+    "expire_slots": 15,
+    "aging_surcharge_bps_per_slot": 2,
+    "max_aging_surcharge_bps": 20,
+    "max_trade_base_atoms": 10000,
+    "protected_max_trade_base_atoms": 500,
+    "inventory_skew_bps_per_10k_imbalance": 1000,
+    "max_inventory_skew_bps": 500,
+    "hard_inventory_band_bps": 3000
+  },
+  "quote_update_envelope": {
+    "max_maker_update_period_slots": 4,
+    "max_landing_latency_slots": 3,
+    "min_update_success_probability_bps": 7400,
+    "same_slot_order": "swap_before_update"
+  },
+  "score": {
+    "mean_p05_fill_rate_bps": 9515,
+    "mean_fill_rate_bps": 9634,
+    "mean_update_drop_rate_bps": 997,
+    "rough_maker_score_quote_atoms": 29485195
+  },
+  "evaluation": {
+    "severity": "pass",
+    "scenario_findings": [
+      {"scenario": "calm-fast-updates", "severity": "pass", "metric": "none", "observed": 0, "threshold": 0},
+      {"scenario": "trending-slow-updates", "severity": "pass", "metric": "none", "observed": 0, "threshold": 0},
+      {"scenario": "volatile-dropped-updates", "severity": "pass", "metric": "none", "observed": 0, "threshold": 0}
+    ]
+  },
+  "scenario_assumptions": [
+    {"name": "calm-fast-updates", "flow_model": "seeded random walk fair price with Bernoulli flow", "landing_model": "fast deterministic maker updates", "paths": 64},
+    {"name": "trending-slow-updates", "flow_model": "positive drift fair price with Bernoulli flow", "landing_model": "slow maker updates with same-slot swap precedence", "paths": 64},
+    {"name": "volatile-dropped-updates", "flow_model": "high-volatility random walk with Bernoulli flow", "landing_model": "dropped quote updates and long landing latency", "paths": 64}
+  ]
+}

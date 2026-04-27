@@ -96,6 +96,8 @@ ReferenceQuote config handoff with the assumptions and gate findings attached.
 The config crate compiles that typed strategy into a bounded ReferenceQuote
 config, validating bps ranges, quote-refresh envelope, account budget, and the
 canonical decimal-scale preimage before any on-chain compiler consumes it.
+It also imports the deterministic ReferenceQuote export fixture back into the
+typed compiler input, without adding a JSON dependency.
 
 Replay CSV rows use this minimal schema:
 
