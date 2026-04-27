@@ -11,13 +11,14 @@ path = "src/lib.rs"
 [features]
 default = []
 cpi = ["no-entrypoint"]
-idl-build = ["anchor-lang/idl-build"]
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
 no-entrypoint = []
 no-idl = []
 no-log-ix-name = []
 
 [dependencies]
 anchor-lang.workspace = true
+anchor-spl.workspace = true
 meta_amm_config.workspace = true
 meta_amm_math.workspace = true
 

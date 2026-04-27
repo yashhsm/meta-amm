@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 use anchor_lang::prelude::*;
+use anchor_spl::token_interface::{Mint, TokenInterface};
 use meta_amm_config::{
     compile_reference_quote_pool_config_account, AccountBudget, ReferenceQuoteConfigInput,
     ReferenceQuoteStrategyConfig, SameSlotUpdateOrder, TokenPairIdentity,
@@ -27,8 +28,8 @@ pub mod meta_amm {
             quote_mint: ctx.accounts.quote_mint.key().to_bytes(),
             base_token_program: ctx.accounts.base_token_program.key().to_bytes(),
             quote_token_program: ctx.accounts.quote_token_program.key().to_bytes(),
-            base_decimals: args.base_decimals,
-            quote_decimals: args.quote_decimals,
+            base_decimals: ctx.accounts.base_mint.decimals,
+            quote_decimals: ctx.accounts.quote_mint.decimals,
         };
         let account_budget = args.account_budget.to_account_budget();
         let input = ReferenceQuoteConfigInput {
@@ -59,14 +60,12 @@ pub struct InitializeReferenceQuotePool<'info> {
     #[account(mut)]
     pub payer: Signer<'info>,
     pub authority: Signer<'info>,
-    /// CHECK: The first program slice stores mint identity only; mint account parsing lands with vault custody.
-    pub base_mint: UncheckedAccount<'info>,
-    /// CHECK: The first program slice stores mint identity only; mint account parsing lands with vault custody.
-    pub quote_mint: UncheckedAccount<'info>,
-    /// CHECK: Stored as part of canonical token-pair identity for decimal-scale preimage.
-    pub base_token_program: UncheckedAccount<'info>,
-    /// CHECK: Stored as part of canonical token-pair identity for decimal-scale preimage.
-    pub quote_token_program: UncheckedAccount<'info>,
+    #[account(mint::token_program = base_token_program)]
+    pub base_mint: InterfaceAccount<'info, Mint>,
+    #[account(mint::token_program = quote_token_program)]
+    pub quote_mint: InterfaceAccount<'info, Mint>,
+    pub base_token_program: Interface<'info, TokenInterface>,
+    pub quote_token_program: Interface<'info, TokenInterface>,
     #[account(
         init,
         payer = payer,
@@ -98,8 +97,6 @@ pub struct ReferenceQuotePoolConfig {
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InitializeReferenceQuotePoolArgs {
-    pub base_decimals: u8,
-    pub quote_decimals: u8,
     pub params: ReferenceQuoteParamsArgs,
     pub quote_update_envelope: QuoteUpdateEnvelopeArgs,
     pub account_budget: AccountBudgetArgs,
@@ -206,8 +203,6 @@ mod tests {
 
     fn default_args() -> InitializeReferenceQuotePoolArgs {
         InitializeReferenceQuotePoolArgs {
-            base_decimals: 8,
-            quote_decimals: 6,
             params: ReferenceQuoteParamsArgs {
                 fee_bps: 30,
                 base_half_spread_bps: 10,

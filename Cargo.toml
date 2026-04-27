@@ -16,6 +16,7 @@ unsafe_code = "forbid"
 
 [workspace.dependencies]
 anchor-lang = "0.32.1"
+anchor-spl = { version = "0.32.1", default-features = false, features = ["token", "token_2022"] }
 meta_amm_config = { path = "crates/meta_amm_config" }
 meta_amm_math = { path = "crates/meta_amm_math" }
 
