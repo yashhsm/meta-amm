@@ -3,6 +3,7 @@
 
 use meta_amm_math::{
     DecimalScale, DecimalScalePreimage, MathError, PriceDomain, ReferenceQuoteParams,
+    DECIMAL_SCALE_PREIMAGE_LEN,
 };
 
 pub const CONFIG_SCHEMA_VERSION: u16 = 1;
@@ -10,6 +11,13 @@ pub const BASIS_POINTS: u16 = 10_000;
 pub const REFERENCE_QUOTE_MODE_ID: u8 = 1;
 pub const REFERENCE_QUOTE_REQUIRED_SWAP_ACCOUNT_METAS: u8 = 10;
 pub const REFERENCE_QUOTE_DEFAULT_SWAP_ACCOUNT_META_BUDGET: u8 = 12;
+pub const REFERENCE_QUOTE_POOL_CONFIG_DISCRIMINATOR: [u8; 8] = *b"MAMMCFG1";
+pub const REFERENCE_QUOTE_POOL_CONFIG_RESERVED_BYTES: usize = 64;
+pub const REFERENCE_QUOTE_POOL_CONFIG_MAX_BYTES: usize = 512;
+pub const REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN: usize =
+    core::mem::size_of::<ReferenceQuotePoolConfigAccount>();
+pub const REFERENCE_QUOTE_SWAP_ACCOUNT_META_HEADROOM: u8 =
+    REFERENCE_QUOTE_DEFAULT_SWAP_ACCOUNT_META_BUDGET - REFERENCE_QUOTE_REQUIRED_SWAP_ACCOUNT_METAS;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +106,155 @@ pub struct CompiledReferenceQuoteConfig {
     pub token_pair: TokenPairIdentity,
     pub decimal_scale_preimage: DecimalScalePreimage,
     pub account_budget: AccountBudget,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolConfigHeaderLayout {
+    pub schema_version: u16,
+    pub mode: u8,
+    pub paused: u8,
+    pub authority_bump: u8,
+    pub _padding: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferenceQuoteParamsLayout {
+    pub aging_start_slots: u64,
+    pub protected_start_slots: u64,
+    pub expire_slots: u64,
+    pub max_trade_base_atoms: u64,
+    pub protected_max_trade_base_atoms: u64,
+    pub fee_bps: u16,
+    pub base_half_spread_bps: u16,
+    pub aging_surcharge_bps_per_slot: u16,
+    pub max_aging_surcharge_bps: u16,
+    pub inventory_skew_bps_per_10k_imbalance: u16,
+    pub max_inventory_skew_bps: u16,
+    pub hard_inventory_band_bps: u16,
+    pub _padding: [u8; 2],
+}
+
+impl ReferenceQuoteParamsLayout {
+    pub const fn from_params(params: ReferenceQuoteParams) -> Self {
+        Self {
+            aging_start_slots: params.aging_start_slots,
+            protected_start_slots: params.protected_start_slots,
+            expire_slots: params.expire_slots,
+            max_trade_base_atoms: params.max_trade_base_atoms,
+            protected_max_trade_base_atoms: params.protected_max_trade_base_atoms,
+            fee_bps: params.fee_bps,
+            base_half_spread_bps: params.base_half_spread_bps,
+            aging_surcharge_bps_per_slot: params.aging_surcharge_bps_per_slot,
+            max_aging_surcharge_bps: params.max_aging_surcharge_bps,
+            inventory_skew_bps_per_10k_imbalance: params.inventory_skew_bps_per_10k_imbalance,
+            max_inventory_skew_bps: params.max_inventory_skew_bps,
+            hard_inventory_band_bps: params.hard_inventory_band_bps,
+            _padding: [0; 2],
+        }
+    }
+
+    pub const fn to_params(self) -> ReferenceQuoteParams {
+        ReferenceQuoteParams {
+            fee_bps: self.fee_bps,
+            base_half_spread_bps: self.base_half_spread_bps,
+            aging_start_slots: self.aging_start_slots,
+            protected_start_slots: self.protected_start_slots,
+            expire_slots: self.expire_slots,
+            aging_surcharge_bps_per_slot: self.aging_surcharge_bps_per_slot,
+            max_aging_surcharge_bps: self.max_aging_surcharge_bps,
+            max_trade_base_atoms: self.max_trade_base_atoms,
+            protected_max_trade_base_atoms: self.protected_max_trade_base_atoms,
+            inventory_skew_bps_per_10k_imbalance: self.inventory_skew_bps_per_10k_imbalance,
+            max_inventory_skew_bps: self.max_inventory_skew_bps,
+            hard_inventory_band_bps: self.hard_inventory_band_bps,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuoteUpdateEnvelopeLayout {
+    pub max_maker_update_period_slots: u64,
+    pub max_landing_latency_slots: u64,
+    pub min_update_success_probability_bps: u16,
+    pub same_slot_order: u8,
+    pub _padding: [u8; 5],
+}
+
+impl QuoteUpdateEnvelopeLayout {
+    pub const fn from_envelope(envelope: QuoteUpdateEnvelope) -> Self {
+        Self {
+            max_maker_update_period_slots: envelope.max_maker_update_period_slots,
+            max_landing_latency_slots: envelope.max_landing_latency_slots,
+            min_update_success_probability_bps: envelope.min_update_success_probability_bps,
+            same_slot_order: same_slot_update_order_to_u8(envelope.same_slot_order),
+            _padding: [0; 5],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AccountBudgetLayout {
+    pub required_swap_account_metas: u8,
+    pub max_swap_account_metas: u8,
+}
+
+impl AccountBudgetLayout {
+    pub const fn from_budget(account_budget: AccountBudget) -> Self {
+        Self {
+            required_swap_account_metas: account_budget.required_swap_account_metas,
+            max_swap_account_metas: account_budget.max_swap_account_metas,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReferenceQuotePoolConfigAccount {
+    pub discriminator: [u8; 8],
+    pub header: PoolConfigHeaderLayout,
+    pub params: ReferenceQuoteParamsLayout,
+    pub quote_update_envelope: QuoteUpdateEnvelopeLayout,
+    pub account_budget: AccountBudgetLayout,
+    pub base_mint: [u8; 32],
+    pub quote_mint: [u8; 32],
+    pub base_token_program: [u8; 32],
+    pub quote_token_program: [u8; 32],
+    pub decimal_scale_preimage: [u8; DECIMAL_SCALE_PREIMAGE_LEN],
+    pub reserved: [u8; REFERENCE_QUOTE_POOL_CONFIG_RESERVED_BYTES],
+}
+
+impl ReferenceQuotePoolConfigAccount {
+    pub fn from_compiled(
+        compiled: CompiledReferenceQuoteConfig,
+        authority_bump: u8,
+        paused: bool,
+    ) -> Self {
+        Self {
+            discriminator: REFERENCE_QUOTE_POOL_CONFIG_DISCRIMINATOR,
+            header: PoolConfigHeaderLayout {
+                schema_version: compiled.schema_version,
+                mode: compiled.mode.as_u8(),
+                paused: u8::from(paused),
+                authority_bump,
+                _padding: [0; 3],
+            },
+            params: ReferenceQuoteParamsLayout::from_params(compiled.params),
+            quote_update_envelope: QuoteUpdateEnvelopeLayout::from_envelope(
+                compiled.quote_update_envelope,
+            ),
+            account_budget: AccountBudgetLayout::from_budget(compiled.account_budget),
+            base_mint: compiled.token_pair.base_mint,
+            quote_mint: compiled.token_pair.quote_mint,
+            base_token_program: compiled.token_pair.base_token_program,
+            quote_token_program: compiled.token_pair.quote_token_program,
+            decimal_scale_preimage: compiled.decimal_scale_preimage.to_bytes(),
+            reserved: [0; REFERENCE_QUOTE_POOL_CONFIG_RESERVED_BYTES],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,6 +431,34 @@ pub fn compile_reference_quote_export(
     .map_err(ConfigImportError::Config)
 }
 
+pub fn compile_reference_quote_pool_config_account(
+    input: ReferenceQuoteConfigInput,
+    authority_bump: u8,
+    paused: bool,
+) -> Result<ReferenceQuotePoolConfigAccount, ConfigError> {
+    let compiled = compile_reference_quote_config(input)?;
+    Ok(ReferenceQuotePoolConfigAccount::from_compiled(
+        compiled,
+        authority_bump,
+        paused,
+    ))
+}
+
+pub fn compile_reference_quote_export_account(
+    source: &str,
+    token_pair: TokenPairIdentity,
+    account_budget: AccountBudget,
+    authority_bump: u8,
+    paused: bool,
+) -> Result<ReferenceQuotePoolConfigAccount, ConfigImportError> {
+    let compiled = compile_reference_quote_export(source, token_pair, account_budget)?;
+    Ok(ReferenceQuotePoolConfigAccount::from_compiled(
+        compiled,
+        authority_bump,
+        paused,
+    ))
+}
+
 pub fn validate_reference_quote_params(params: ReferenceQuoteParams) -> Result<(), ConfigError> {
     validate_bps(BpsField::Fee, params.fee_bps)?;
     validate_bps(BpsField::BaseHalfSpread, params.base_half_spread_bps)?;
@@ -353,6 +538,13 @@ fn validate_bps(field: BpsField, value: u16) -> Result<(), ConfigError> {
         return Err(ConfigError::BpsOutOfRange(field));
     }
     Ok(())
+}
+
+const fn same_slot_update_order_to_u8(order: SameSlotUpdateOrder) -> u8 {
+    match order {
+        SameSlotUpdateOrder::UpdateBeforeSwap => 0,
+        SameSlotUpdateOrder::SwapBeforeUpdate => 1,
+    }
 }
 
 fn parse_u16_field(source: &str, field: ExportField) -> Result<u16, ConfigImportError> {
@@ -547,6 +739,84 @@ mod tests {
         assert_eq!(
             compiled.decimal_scale_preimage,
             token_pair().decimal_scale_preimage()
+        );
+    }
+
+    #[test]
+    fn reference_quote_pool_config_account_layout_has_fixed_size_and_meta_headroom() {
+        let layout_len = core::mem::size_of::<ReferenceQuotePoolConfigAccount>();
+        assert_eq!(layout_len, REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN);
+        assert_eq!(layout_len, 448);
+        assert!(layout_len <= REFERENCE_QUOTE_POOL_CONFIG_MAX_BYTES);
+        assert_eq!(layout_len % 8, 0);
+
+        let budget = AccountBudget::reference_quote_jupiter_default();
+        let headroom = budget
+            .max_swap_account_metas
+            .saturating_sub(budget.required_swap_account_metas);
+        assert_eq!(headroom, REFERENCE_QUOTE_SWAP_ACCOUNT_META_HEADROOM);
+        assert_eq!(headroom, 2);
+        assert_eq!(
+            budget.required_swap_account_metas,
+            REFERENCE_QUOTE_REQUIRED_SWAP_ACCOUNT_METAS
+        );
+        assert_eq!(
+            budget.max_swap_account_metas,
+            REFERENCE_QUOTE_DEFAULT_SWAP_ACCOUNT_META_BUDGET
+        );
+        assert!(budget.required_swap_account_metas < budget.max_swap_account_metas);
+    }
+
+    #[test]
+    fn compiles_reference_quote_export_into_pool_config_account_layout() {
+        let account = compile_reference_quote_export_account(
+            REFERENCE_QUOTE_EXPORT_FIXTURE,
+            token_pair(),
+            AccountBudget::reference_quote_jupiter_default(),
+            254,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            account.discriminator,
+            REFERENCE_QUOTE_POOL_CONFIG_DISCRIMINATOR
+        );
+        assert_eq!(account.header.schema_version, CONFIG_SCHEMA_VERSION);
+        assert_eq!(account.header.mode, REFERENCE_QUOTE_MODE_ID);
+        assert_eq!(account.header.paused, 0);
+        assert_eq!(account.header.authority_bump, 254);
+        assert_eq!(account.header._padding, [0; 3]);
+        assert_eq!(account.params.to_params(), params());
+        assert_eq!(
+            account.quote_update_envelope.max_maker_update_period_slots,
+            strategy()
+                .quote_update_envelope
+                .max_maker_update_period_slots
+        );
+        assert_eq!(
+            account.quote_update_envelope.max_landing_latency_slots,
+            strategy().quote_update_envelope.max_landing_latency_slots
+        );
+        assert_eq!(
+            account
+                .quote_update_envelope
+                .min_update_success_probability_bps,
+            strategy()
+                .quote_update_envelope
+                .min_update_success_probability_bps
+        );
+        assert_eq!(account.quote_update_envelope.same_slot_order, 1);
+        assert_eq!(account.account_budget.required_swap_account_metas, 10);
+        assert_eq!(account.account_budget.max_swap_account_metas, 12);
+        assert_eq!(account.base_mint, token_pair().base_mint);
+        assert_eq!(
+            account.decimal_scale_preimage,
+            token_pair().decimal_scale_preimage().to_bytes()
+        );
+        assert_eq!(
+            account.reserved,
+            [0; REFERENCE_QUOTE_POOL_CONFIG_RESERVED_BYTES]
         );
     }
 

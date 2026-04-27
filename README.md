@@ -98,6 +98,9 @@ config, validating bps ranges, quote-refresh envelope, account budget, and the
 canonical decimal-scale preimage before any on-chain compiler consumes it.
 It also imports the deterministic ReferenceQuote export fixture back into the
 typed compiler input, without adding a JSON dependency.
+The compiled ReferenceQuote config now maps into a fixed-size pool-config
+account layout with tests for byte length, reserved headroom, and swap account
+meta budget.
 
 Replay CSV rows use this minimal schema:
 
