@@ -255,14 +255,16 @@ fn inventory_imbalance_bps(base_inventory: u64, target_base_inventory: u64) -> i
         return 0;
     }
     let delta = (base_inventory as i128) - (target_base_inventory as i128);
-    ((delta * 10_000) / (target_base_inventory as i128)) as i32
+    let bps = delta.saturating_mul(10_000) / (target_base_inventory as i128);
+    bps.clamp(i32::MIN as i128, i32::MAX as i128) as i32
 }
 
 fn inventory_skew_bps(imbalance_bps: i32, params: ReferenceQuoteParams) -> i32 {
-    let raw = ((imbalance_bps as i128) * (params.inventory_skew_bps_per_10k_imbalance as i128)
-        / 10_000) as i32;
-    let cap = params.max_inventory_skew_bps as i32;
-    raw.clamp(-cap, cap)
+    let raw = (imbalance_bps as i128)
+        .saturating_mul(params.inventory_skew_bps_per_10k_imbalance as i128)
+        / 10_000;
+    let cap = params.max_inventory_skew_bps as i128;
+    raw.clamp(-cap, cap) as i32
 }
 
 fn effective_price(
@@ -386,6 +388,26 @@ mod tests {
             quote_exact_in(paused, params(), 500, true),
             Err(MathError::PoolPaused)
         );
+    }
+
+    #[test]
+    fn imbalance_saturates_instead_of_wrapping_for_tiny_target() {
+        // Previously `((delta * 10_000) / target) as i32` truncated to i32
+        // and could wrap into the hard-band window. With saturating math the
+        // imbalance pins to i32::MAX and the post-trade band check rejects.
+        let mut state = base_state(10);
+        state.target_base_inventory = 1;
+        state.base_inventory = u64::MAX / 2;
+        state.quote_inventory = 1_000_000_000_000;
+
+        assert!(matches!(
+            quote_exact_in(state, params(), 1, true),
+            Err(MathError::InvalidAmount) | Err(MathError::InventoryBand)
+        ));
+
+        // Direct check: the bps value saturates, not wraps.
+        let bps = super::inventory_imbalance_bps(state.base_inventory, state.target_base_inventory);
+        assert_eq!(bps, i32::MAX);
     }
 
     #[test]

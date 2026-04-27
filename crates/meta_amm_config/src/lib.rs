@@ -16,6 +16,26 @@ pub const REFERENCE_QUOTE_POOL_CONFIG_RESERVED_BYTES: usize = 64;
 pub const REFERENCE_QUOTE_POOL_CONFIG_MAX_BYTES: usize = 512;
 pub const REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN: usize =
     core::mem::size_of::<ReferenceQuotePoolConfigAccount>();
+
+/// Byte sum the manual `to_bytes` writer emits, computed independently of
+/// `core::mem::size_of`. Held equal to `REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN`
+/// by the const assertion below so reordering or adding a field that desyncs
+/// the writer from the struct layout is a compile error rather than a
+/// debug-only assert.
+pub const REFERENCE_QUOTE_POOL_CONFIG_WRITER_LEN: usize = 8 // discriminator
+    + 2 + 1 + 1 + 1 + 3 // PoolConfigHeaderLayout
+    + 5 * 8 + 7 * 2 + 2 // ReferenceQuoteParamsLayout
+    + 2 * 8 + 2 + 1 + 5 // QuoteUpdateEnvelopeLayout
+    + 1 + 1 // AccountBudgetLayout
+    + 4 * 32 // base/quote mints + base/quote token programs
+    + DECIMAL_SCALE_PREIMAGE_LEN
+    + REFERENCE_QUOTE_POOL_CONFIG_RESERVED_BYTES
+    + 2; // _trailing_padding
+
+const _: () = assert!(
+    REFERENCE_QUOTE_POOL_CONFIG_WRITER_LEN == REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN,
+    "manual to_bytes writer length must match ReferenceQuotePoolConfigAccount layout size"
+);
 pub const REFERENCE_QUOTE_SWAP_ACCOUNT_META_HEADROOM: u8 =
     REFERENCE_QUOTE_DEFAULT_SWAP_ACCOUNT_META_BUDGET - REFERENCE_QUOTE_REQUIRED_SWAP_ACCOUNT_METAS;
 
@@ -332,7 +352,11 @@ impl ReferenceQuotePoolConfigAccount {
         put_bytes(&mut out, &mut offset, &self.decimal_scale_preimage);
         put_bytes(&mut out, &mut offset, &self.reserved);
         put_bytes(&mut out, &mut offset, &self._trailing_padding);
-        debug_assert_eq!(offset, REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN);
+        // Writer length is locked to the struct layout by the
+        // REFERENCE_QUOTE_POOL_CONFIG_WRITER_LEN const assertion above; this
+        // assert catches the off-chance that a `put_*` helper drifts in size
+        // without changing the const.
+        debug_assert_eq!(offset, REFERENCE_QUOTE_POOL_CONFIG_WRITER_LEN);
 
         out
     }
@@ -669,6 +693,15 @@ fn parse_u64_field(source: &str, field: ExportField) -> Result<u64, ConfigImport
     if digits_len == 0 {
         return Err(ConfigImportError::InvalidNumber(field));
     }
+    // Reject trailing junk like `30abc`. Numbers in the export must be
+    // terminated by whitespace, `,`, `}`, `]`, or end-of-input — anything
+    // else means the input wasn't shaped like the simulator export.
+    if let Some(next) = value.as_bytes().get(digits_len) {
+        let ok = matches!(*next, b',' | b'}' | b']') || next.is_ascii_whitespace();
+        if !ok {
+            return Err(ConfigImportError::InvalidNumber(field));
+        }
+    }
     parse_u64_digits(&value[..digits_len]).ok_or(ConfigImportError::InvalidNumber(field))
 }
 
@@ -930,6 +963,19 @@ mod tests {
         assert_eq!(bytes[11], 0);
         assert_eq!(bytes[12], 254);
         assert_eq!(bytes[REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN - 2..], [0, 0]);
+    }
+
+    #[test]
+    fn parser_rejects_trailing_junk_after_numeric_field() {
+        // The parser is closed-loop with the simulator's export writer; any
+        // number that isn't terminated by whitespace, `,`, `}`, `]`, or EOI
+        // is treated as malformed input.
+        let bad_number =
+            REFERENCE_QUOTE_EXPORT_FIXTURE.replacen("\"fee_bps\": 30", "\"fee_bps\": 30abc", 1);
+        assert_eq!(
+            parse_reference_quote_strategy_export(&bad_number),
+            Err(ConfigImportError::InvalidNumber(ExportField::FeeBps))
+        );
     }
 
     #[test]
