@@ -24,6 +24,7 @@ The project direction is:
 - [Selected architecture](docs/architecture/architecture.md)
 - [Implementation-slice review](docs/architecture/implementation-slice-review.md)
 - [MVP roadmap](docs/roadmap/mvp-roadmap.md)
+- Anchor program slice for initializing ReferenceQuote pool config PDAs
 
 ## Current Decision
 
@@ -57,6 +58,8 @@ crates/
   meta_amm_config/
   meta_amm_math/
   meta_amm_sim/
+programs/
+  meta_amm/
 docs/
   architecture/
     architecture.md
@@ -73,13 +76,24 @@ tests/
 ## Development
 
 ```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
 cargo test
+anchor build
 cargo run -p meta_amm_sim --quiet
 cargo run -p meta_amm_sim --quiet -- --scenario-pack
 cargo run -p meta_amm_sim --quiet -- --calibrate-reference
 cargo run -p meta_amm_sim --quiet -- --calibrate-reference --export-best-config
 cargo run -p meta_amm_sim --quiet -- --replay-csv tests/fixtures/reference-replay.csv
 ```
+
+The current Anchor program exposes `initialize_reference_quote_pool`, which
+creates a deterministic pool-config PDA for an authority/base/quote mint tuple.
+The instruction validates ReferenceQuote parameters through the shared bounded
+config compiler and stores the resulting fixed-size config-layout bytes in the
+Anchor account. This is intentionally init-only: token vault custody, quote
+state updates, and swap execution are separate slices so account budgets and
+trust boundaries stay explicit.
 
 The current simulator binary is a deterministic multi-path smoke scenario for
 CPMM and ReferenceQuote. ReferenceQuote now models quote landing latency,

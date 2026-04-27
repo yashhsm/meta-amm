@@ -225,6 +225,7 @@ pub struct ReferenceQuotePoolConfigAccount {
     pub quote_token_program: [u8; 32],
     pub decimal_scale_preimage: [u8; DECIMAL_SCALE_PREIMAGE_LEN],
     pub reserved: [u8; REFERENCE_QUOTE_POOL_CONFIG_RESERVED_BYTES],
+    pub _trailing_padding: [u8; 2],
 }
 
 impl ReferenceQuotePoolConfigAccount {
@@ -253,7 +254,87 @@ impl ReferenceQuotePoolConfigAccount {
             quote_token_program: compiled.token_pair.quote_token_program,
             decimal_scale_preimage: compiled.decimal_scale_preimage.to_bytes(),
             reserved: [0; REFERENCE_QUOTE_POOL_CONFIG_RESERVED_BYTES],
+            _trailing_padding: [0; 2],
         }
+    }
+
+    pub fn to_bytes(self) -> [u8; REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN] {
+        let mut out = [0u8; REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN];
+        let mut offset = 0usize;
+
+        put_bytes(&mut out, &mut offset, &self.discriminator);
+        put_u16(&mut out, &mut offset, self.header.schema_version);
+        put_u8(&mut out, &mut offset, self.header.mode);
+        put_u8(&mut out, &mut offset, self.header.paused);
+        put_u8(&mut out, &mut offset, self.header.authority_bump);
+        put_bytes(&mut out, &mut offset, &self.header._padding);
+        put_u64(&mut out, &mut offset, self.params.aging_start_slots);
+        put_u64(&mut out, &mut offset, self.params.protected_start_slots);
+        put_u64(&mut out, &mut offset, self.params.expire_slots);
+        put_u64(&mut out, &mut offset, self.params.max_trade_base_atoms);
+        put_u64(
+            &mut out,
+            &mut offset,
+            self.params.protected_max_trade_base_atoms,
+        );
+        put_u16(&mut out, &mut offset, self.params.fee_bps);
+        put_u16(&mut out, &mut offset, self.params.base_half_spread_bps);
+        put_u16(
+            &mut out,
+            &mut offset,
+            self.params.aging_surcharge_bps_per_slot,
+        );
+        put_u16(&mut out, &mut offset, self.params.max_aging_surcharge_bps);
+        put_u16(
+            &mut out,
+            &mut offset,
+            self.params.inventory_skew_bps_per_10k_imbalance,
+        );
+        put_u16(&mut out, &mut offset, self.params.max_inventory_skew_bps);
+        put_u16(&mut out, &mut offset, self.params.hard_inventory_band_bps);
+        put_bytes(&mut out, &mut offset, &self.params._padding);
+        put_u64(
+            &mut out,
+            &mut offset,
+            self.quote_update_envelope.max_maker_update_period_slots,
+        );
+        put_u64(
+            &mut out,
+            &mut offset,
+            self.quote_update_envelope.max_landing_latency_slots,
+        );
+        put_u16(
+            &mut out,
+            &mut offset,
+            self.quote_update_envelope
+                .min_update_success_probability_bps,
+        );
+        put_u8(
+            &mut out,
+            &mut offset,
+            self.quote_update_envelope.same_slot_order,
+        );
+        put_bytes(&mut out, &mut offset, &self.quote_update_envelope._padding);
+        put_u8(
+            &mut out,
+            &mut offset,
+            self.account_budget.required_swap_account_metas,
+        );
+        put_u8(
+            &mut out,
+            &mut offset,
+            self.account_budget.max_swap_account_metas,
+        );
+        put_bytes(&mut out, &mut offset, &self.base_mint);
+        put_bytes(&mut out, &mut offset, &self.quote_mint);
+        put_bytes(&mut out, &mut offset, &self.base_token_program);
+        put_bytes(&mut out, &mut offset, &self.quote_token_program);
+        put_bytes(&mut out, &mut offset, &self.decimal_scale_preimage);
+        put_bytes(&mut out, &mut offset, &self.reserved);
+        put_bytes(&mut out, &mut offset, &self._trailing_padding);
+        debug_assert_eq!(offset, REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN);
+
+        out
     }
 }
 
@@ -540,6 +621,28 @@ fn validate_bps(field: BpsField, value: u16) -> Result<(), ConfigError> {
     Ok(())
 }
 
+fn put_u8<const N: usize>(out: &mut [u8; N], offset: &mut usize, value: u8) {
+    out[*offset] = value;
+    *offset += 1;
+}
+
+fn put_u16<const N: usize>(out: &mut [u8; N], offset: &mut usize, value: u16) {
+    put_bytes(out, offset, &value.to_le_bytes());
+}
+
+fn put_u64<const N: usize>(out: &mut [u8; N], offset: &mut usize, value: u64) {
+    put_bytes(out, offset, &value.to_le_bytes());
+}
+
+fn put_bytes<const OUT: usize, const INPUT: usize>(
+    out: &mut [u8; OUT],
+    offset: &mut usize,
+    value: &[u8; INPUT],
+) {
+    out[*offset..*offset + INPUT].copy_from_slice(value);
+    *offset += INPUT;
+}
+
 const fn same_slot_update_order_to_u8(order: SameSlotUpdateOrder) -> u8 {
     match order {
         SameSlotUpdateOrder::UpdateBeforeSwap => 0,
@@ -818,6 +921,15 @@ mod tests {
             account.reserved,
             [0; REFERENCE_QUOTE_POOL_CONFIG_RESERVED_BYTES]
         );
+        assert_eq!(account._trailing_padding, [0; 2]);
+        let bytes = account.to_bytes();
+        assert_eq!(bytes.len(), REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN);
+        assert_eq!(&bytes[..8], &REFERENCE_QUOTE_POOL_CONFIG_DISCRIMINATOR);
+        assert_eq!(bytes[8..10], CONFIG_SCHEMA_VERSION.to_le_bytes());
+        assert_eq!(bytes[10], REFERENCE_QUOTE_MODE_ID);
+        assert_eq!(bytes[11], 0);
+        assert_eq!(bytes[12], 254);
+        assert_eq!(bytes[REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN - 2..], [0, 0]);
     }
 
     #[test]

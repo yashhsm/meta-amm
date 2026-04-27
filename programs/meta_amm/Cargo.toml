@@ -1,0 +1,25 @@
+[package]
+name = "meta_amm"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "meta_amm"
+path = "src/lib.rs"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+idl-build = ["anchor-lang/idl-build"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+
+[dependencies]
+anchor-lang.workspace = true
+meta_amm_config.workspace = true
+meta_amm_math.workspace = true
+
+[lints]
+workspace = true
