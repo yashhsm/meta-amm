@@ -22,8 +22,7 @@ pub const REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN: usize =
 /// by the const assertion below so reordering or adding a field that desyncs
 /// the writer from the struct layout is a compile error rather than a
 /// debug-only assert.
-pub const REFERENCE_QUOTE_POOL_CONFIG_WRITER_LEN: usize =
-    8 // discriminator
+pub const REFERENCE_QUOTE_POOL_CONFIG_WRITER_LEN: usize = 8 // discriminator
     + 2 + 1 + 1 + 1 + 3 // PoolConfigHeaderLayout
     + 5 * 8 + 7 * 2 + 2 // ReferenceQuoteParamsLayout
     + 2 * 8 + 2 + 1 + 5 // QuoteUpdateEnvelopeLayout

@@ -260,9 +260,9 @@ fn inventory_imbalance_bps(base_inventory: u64, target_base_inventory: u64) -> i
 }
 
 fn inventory_skew_bps(imbalance_bps: i32, params: ReferenceQuoteParams) -> i32 {
-    let raw = (imbalance_bps as i128).saturating_mul(
-        params.inventory_skew_bps_per_10k_imbalance as i128,
-    ) / 10_000;
+    let raw = (imbalance_bps as i128)
+        .saturating_mul(params.inventory_skew_bps_per_10k_imbalance as i128)
+        / 10_000;
     let cap = params.max_inventory_skew_bps as i128;
     raw.clamp(-cap, cap) as i32
 }
