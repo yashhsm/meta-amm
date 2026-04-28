@@ -6,13 +6,14 @@ use anchor_spl::token_interface::{Mint, TokenInterface};
 use meta_amm_config::{
     compile_reference_quote_pool_config_account, AccountBudget, ReferenceQuoteConfigInput,
     ReferenceQuoteStrategyConfig, SameSlotUpdateOrder, TokenPairIdentity,
-    REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN,
+    REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN, REFERENCE_QUOTE_POOL_CONFIG_SAME_SLOT_ORDER_OFFSET,
 };
 use meta_amm_math::ReferenceQuoteParams;
 
 declare_id!("CzVBvCUvx8RWEsiRybEAtr6TwydEn9WByXG7WTezGsq1");
 
 pub const POOL_CONFIG_SEED: &[u8] = b"pool-config";
+pub const QUOTE_STATE_SEED: &[u8] = b"quote-state";
 
 #[program]
 pub mod meta_amm {
@@ -52,6 +53,50 @@ pub mod meta_amm {
 
         Ok(())
     }
+
+    pub fn initialize_reference_quote_state(
+        ctx: Context<InitializeReferenceQuoteState>,
+        args: InitializeReferenceQuoteStateArgs,
+    ) -> Result<()> {
+        require!(
+            args.quote_authority != Pubkey::default(),
+            MetaAmmError::InvalidQuoteAuthority
+        );
+
+        let same_slot_order = ctx.accounts.pool_config.reference_quote_same_slot_order()?;
+        let quote_state = &mut ctx.accounts.quote_state;
+        quote_state.pool_config = ctx.accounts.pool_config.key();
+        quote_state.quote_authority = args.quote_authority;
+        quote_state.bump = ctx.bumps.quote_state;
+        quote_state.paused = false;
+        quote_state.same_slot_order = same_slot_order;
+        quote_state._padding = [0; 5];
+        quote_state.mid_price_q64x64 = 0;
+        quote_state.publish_slot = 0;
+        quote_state.sequence = 0;
+        quote_state.last_update_slot = 0;
+
+        Ok(())
+    }
+
+    pub fn update_reference_quote(
+        ctx: Context<UpdateReferenceQuote>,
+        args: UpdateReferenceQuoteArgs,
+    ) -> Result<()> {
+        require_eq!(
+            ctx.accounts.quote_state.same_slot_order,
+            ctx.accounts.pool_config.reference_quote_same_slot_order()?,
+            MetaAmmError::QuoteStateOrderMismatch
+        );
+
+        let current_slot = Clock::get()?.slot;
+        ctx.accounts.quote_state.apply_update(
+            ctx.accounts.pool_config.authority,
+            ctx.accounts.quote_signer.key(),
+            args,
+            current_slot,
+        )
+    }
 }
 
 #[derive(Accounts)]
@@ -82,6 +127,63 @@ pub struct InitializeReferenceQuotePool<'info> {
     pub system_program: Program<'info, System>,
 }
 
+#[derive(Accounts)]
+pub struct InitializeReferenceQuoteState<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(
+        constraint = pool_config.authority == authority.key() @ MetaAmmError::UnauthorizedPoolAuthority
+    )]
+    pub authority: Signer<'info>,
+    #[account(
+        seeds = [
+            POOL_CONFIG_SEED,
+            pool_config.authority.as_ref(),
+            pool_config.base_mint.as_ref(),
+            pool_config.quote_mint.as_ref(),
+        ],
+        bump = pool_config.bump
+    )]
+    pub pool_config: Account<'info, ReferenceQuotePoolConfig>,
+    #[account(
+        init,
+        payer = payer,
+        space = 8 + ReferenceQuoteState::INIT_SPACE,
+        seeds = [
+            QUOTE_STATE_SEED,
+            pool_config.key().as_ref(),
+        ],
+        bump
+    )]
+    pub quote_state: Account<'info, ReferenceQuoteState>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct UpdateReferenceQuote<'info> {
+    pub quote_signer: Signer<'info>,
+    #[account(
+        seeds = [
+            POOL_CONFIG_SEED,
+            pool_config.authority.as_ref(),
+            pool_config.base_mint.as_ref(),
+            pool_config.quote_mint.as_ref(),
+        ],
+        bump = pool_config.bump
+    )]
+    pub pool_config: Account<'info, ReferenceQuotePoolConfig>,
+    #[account(
+        mut,
+        seeds = [
+            QUOTE_STATE_SEED,
+            pool_config.key().as_ref(),
+        ],
+        bump = quote_state.bump,
+        constraint = quote_state.pool_config == pool_config.key() @ MetaAmmError::QuoteStatePoolMismatch
+    )]
+    pub quote_state: Account<'info, ReferenceQuoteState>,
+}
+
 #[account]
 #[derive(InitSpace)]
 pub struct ReferenceQuotePoolConfig {
@@ -93,6 +195,69 @@ pub struct ReferenceQuotePoolConfig {
     pub bump: u8,
     pub paused: bool,
     pub layout: [u8; REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN],
+}
+
+impl ReferenceQuotePoolConfig {
+    fn reference_quote_same_slot_order(&self) -> Result<u8> {
+        match self.layout[REFERENCE_QUOTE_POOL_CONFIG_SAME_SLOT_ORDER_OFFSET] {
+            0 => Ok(0),
+            1 => Ok(1),
+            _ => err!(MetaAmmError::InvalidSameSlotUpdateOrder),
+        }
+    }
+}
+
+#[account]
+#[derive(InitSpace)]
+pub struct ReferenceQuoteState {
+    pub pool_config: Pubkey,
+    pub quote_authority: Pubkey,
+    pub bump: u8,
+    pub paused: bool,
+    pub same_slot_order: u8,
+    pub _padding: [u8; 5],
+    pub mid_price_q64x64: u128,
+    pub publish_slot: u64,
+    pub sequence: u64,
+    pub last_update_slot: u64,
+}
+
+impl ReferenceQuoteState {
+    fn apply_update(
+        &mut self,
+        pool_authority: Pubkey,
+        signer: Pubkey,
+        args: UpdateReferenceQuoteArgs,
+        current_slot: u64,
+    ) -> Result<()> {
+        require!(
+            signer == pool_authority || signer == self.quote_authority,
+            MetaAmmError::UnauthorizedQuoteUpdate
+        );
+        require!(
+            args.mid_price_q64x64 > 0,
+            MetaAmmError::InvalidReferenceQuotePrice
+        );
+        require!(
+            args.sequence > self.sequence,
+            MetaAmmError::NonMonotonicQuoteSequence
+        );
+        require!(
+            args.publish_slot >= self.publish_slot,
+            MetaAmmError::StaleQuotePublishSlot
+        );
+        require!(
+            args.publish_slot <= current_slot,
+            MetaAmmError::FutureQuotePublishSlot
+        );
+
+        self.mid_price_q64x64 = args.mid_price_q64x64;
+        self.publish_slot = args.publish_slot;
+        self.sequence = args.sequence;
+        self.last_update_slot = current_slot;
+
+        Ok(())
+    }
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -185,12 +350,42 @@ impl AccountBudgetArgs {
     }
 }
 
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InitializeReferenceQuoteStateArgs {
+    pub quote_authority: Pubkey,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UpdateReferenceQuoteArgs {
+    pub mid_price_q64x64: u128,
+    pub publish_slot: u64,
+    pub sequence: u64,
+}
+
 #[error_code]
 pub enum MetaAmmError {
     #[msg("ReferenceQuote config failed bounded compiler validation")]
     InvalidReferenceQuoteConfig,
     #[msg("same_slot_order must be 0 update_before_swap or 1 swap_before_update")]
     InvalidSameSlotUpdateOrder,
+    #[msg("authority does not control this pool config")]
+    UnauthorizedPoolAuthority,
+    #[msg("quote_authority must be non-default")]
+    InvalidQuoteAuthority,
+    #[msg("quote signer is not authorized for this pool")]
+    UnauthorizedQuoteUpdate,
+    #[msg("quote mid price must be positive")]
+    InvalidReferenceQuotePrice,
+    #[msg("quote sequence must increase monotonically")]
+    NonMonotonicQuoteSequence,
+    #[msg("quote publish slot cannot move backwards")]
+    StaleQuotePublishSlot,
+    #[msg("quote publish slot cannot be in the future")]
+    FutureQuotePublishSlot,
+    #[msg("quote state belongs to a different pool config")]
+    QuoteStatePoolMismatch,
+    #[msg("quote state ordering metadata does not match pool config")]
+    QuoteStateOrderMismatch,
 }
 
 #[cfg(test)]
@@ -200,6 +395,10 @@ mod tests {
         REFERENCE_QUOTE_DEFAULT_SWAP_ACCOUNT_META_BUDGET,
         REFERENCE_QUOTE_REQUIRED_SWAP_ACCOUNT_METAS,
     };
+
+    fn key(byte: u8) -> Pubkey {
+        Pubkey::new_from_array([byte; 32])
+    }
 
     fn default_args() -> InitializeReferenceQuotePoolArgs {
         InitializeReferenceQuotePoolArgs {
@@ -230,6 +429,61 @@ mod tests {
         }
     }
 
+    fn pool_config(authority: Pubkey, same_slot_order: u8) -> ReferenceQuotePoolConfig {
+        let mut args = default_args();
+        args.quote_update_envelope.same_slot_order = same_slot_order;
+        let token_pair = TokenPairIdentity {
+            base_mint: key(2).to_bytes(),
+            quote_mint: key(3).to_bytes(),
+            base_token_program: key(4).to_bytes(),
+            quote_token_program: key(5).to_bytes(),
+            base_decimals: 8,
+            quote_decimals: 6,
+        };
+        let input = ReferenceQuoteConfigInput {
+            strategy: args.strategy_config().unwrap(),
+            token_pair,
+            account_budget: args.account_budget.to_account_budget(),
+        };
+        let layout = compile_reference_quote_pool_config_account(input, 254, false)
+            .unwrap()
+            .to_bytes();
+
+        ReferenceQuotePoolConfig {
+            authority,
+            base_mint: key(2),
+            quote_mint: key(3),
+            base_token_program: key(4),
+            quote_token_program: key(5),
+            bump: 254,
+            paused: false,
+            layout,
+        }
+    }
+
+    fn quote_state(pool_config: Pubkey, quote_authority: Pubkey) -> ReferenceQuoteState {
+        ReferenceQuoteState {
+            pool_config,
+            quote_authority,
+            bump: 253,
+            paused: false,
+            same_slot_order: 1,
+            _padding: [0; 5],
+            mid_price_q64x64: 0,
+            publish_slot: 0,
+            sequence: 0,
+            last_update_slot: 0,
+        }
+    }
+
+    fn update_args(sequence: u64, publish_slot: u64) -> UpdateReferenceQuoteArgs {
+        UpdateReferenceQuoteArgs {
+            mid_price_q64x64: 30_000u128 << 64,
+            publish_slot,
+            sequence,
+        }
+    }
+
     #[test]
     fn init_args_compile_to_reference_quote_strategy_config() {
         let strategy = default_args().strategy_config().unwrap();
@@ -255,5 +509,139 @@ mod tests {
             ReferenceQuotePoolConfig::INIT_SPACE,
             32 * 5 + 1 + 1 + REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN
         );
+    }
+
+    #[test]
+    fn quote_state_account_space_is_stable() {
+        assert_eq!(
+            ReferenceQuoteState::INIT_SPACE,
+            32 + 32 + 1 + 1 + 1 + 5 + 16 + 8 + 8 + 8
+        );
+    }
+
+    #[test]
+    fn pool_config_reads_same_slot_order_from_compiled_layout() {
+        let mut pool_config = pool_config(key(1), 1);
+
+        assert_eq!(pool_config.reference_quote_same_slot_order().unwrap(), 1);
+        assert_eq!(
+            pool_config.layout[REFERENCE_QUOTE_POOL_CONFIG_SAME_SLOT_ORDER_OFFSET],
+            1
+        );
+
+        pool_config.layout[REFERENCE_QUOTE_POOL_CONFIG_SAME_SLOT_ORDER_OFFSET] = 3;
+        assert!(pool_config.reference_quote_same_slot_order().is_err());
+    }
+
+    #[test]
+    fn quote_update_accepts_pool_authority_and_tracks_landing_slot() {
+        let pool_authority = key(1);
+        let quote_authority = key(2);
+        let mut state = quote_state(key(3), quote_authority);
+
+        state
+            .apply_update(pool_authority, pool_authority, update_args(1, 10), 12)
+            .unwrap();
+
+        assert_eq!(state.mid_price_q64x64, 30_000u128 << 64);
+        assert_eq!(state.publish_slot, 10);
+        assert_eq!(state.sequence, 1);
+        assert_eq!(state.last_update_slot, 12);
+    }
+
+    #[test]
+    fn quote_update_accepts_quote_authority() {
+        let pool_authority = key(1);
+        let quote_authority = key(2);
+        let mut state = quote_state(key(3), quote_authority);
+
+        assert!(state
+            .apply_update(pool_authority, quote_authority, update_args(1, 10), 12)
+            .is_ok());
+    }
+
+    #[test]
+    fn quote_update_allows_same_publish_slot_with_higher_sequence() {
+        let pool_authority = key(1);
+        let quote_authority = key(2);
+        let mut state = quote_state(key(3), quote_authority);
+
+        state
+            .apply_update(pool_authority, quote_authority, update_args(1, 10), 12)
+            .unwrap();
+        state
+            .apply_update(pool_authority, quote_authority, update_args(2, 10), 12)
+            .unwrap();
+
+        assert_eq!(state.publish_slot, 10);
+        assert_eq!(state.sequence, 2);
+    }
+
+    #[test]
+    fn quote_update_rejects_bad_authority() {
+        let pool_authority = key(1);
+        let quote_authority = key(2);
+        let mut state = quote_state(key(3), quote_authority);
+
+        assert!(state
+            .apply_update(pool_authority, key(9), update_args(1, 10), 12)
+            .is_err());
+    }
+
+    #[test]
+    fn quote_update_rejects_replayed_or_lower_sequence() {
+        let pool_authority = key(1);
+        let quote_authority = key(2);
+        let mut state = quote_state(key(3), quote_authority);
+
+        state
+            .apply_update(pool_authority, quote_authority, update_args(3, 10), 12)
+            .unwrap();
+
+        assert!(state
+            .apply_update(pool_authority, quote_authority, update_args(3, 11), 12)
+            .is_err());
+        assert!(state
+            .apply_update(pool_authority, quote_authority, update_args(2, 11), 12)
+            .is_err());
+    }
+
+    #[test]
+    fn quote_update_rejects_backdated_publish_slot() {
+        let pool_authority = key(1);
+        let quote_authority = key(2);
+        let mut state = quote_state(key(3), quote_authority);
+
+        state
+            .apply_update(pool_authority, quote_authority, update_args(1, 10), 12)
+            .unwrap();
+
+        assert!(state
+            .apply_update(pool_authority, quote_authority, update_args(2, 9), 12)
+            .is_err());
+    }
+
+    #[test]
+    fn quote_update_rejects_future_publish_slot() {
+        let pool_authority = key(1);
+        let quote_authority = key(2);
+        let mut state = quote_state(key(3), quote_authority);
+
+        assert!(state
+            .apply_update(pool_authority, quote_authority, update_args(1, 13), 12)
+            .is_err());
+    }
+
+    #[test]
+    fn quote_update_rejects_zero_price() {
+        let pool_authority = key(1);
+        let quote_authority = key(2);
+        let mut state = quote_state(key(3), quote_authority);
+        let mut args = update_args(1, 10);
+        args.mid_price_q64x64 = 0;
+
+        assert!(state
+            .apply_update(pool_authority, quote_authority, args, 12)
+            .is_err());
     }
 }

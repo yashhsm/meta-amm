@@ -16,6 +16,7 @@ pub const REFERENCE_QUOTE_POOL_CONFIG_RESERVED_BYTES: usize = 64;
 pub const REFERENCE_QUOTE_POOL_CONFIG_MAX_BYTES: usize = 512;
 pub const REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN: usize =
     core::mem::size_of::<ReferenceQuotePoolConfigAccount>();
+pub const REFERENCE_QUOTE_POOL_CONFIG_SAME_SLOT_ORDER_OFFSET: usize = 8 + 8 + 56 + 8 + 8 + 2;
 
 /// Byte sum the manual `to_bytes` writer emits, computed independently of
 /// `core::mem::size_of`. Held equal to `REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN`
@@ -35,6 +36,9 @@ pub const REFERENCE_QUOTE_POOL_CONFIG_WRITER_LEN: usize = 8 // discriminator
 const _: () = assert!(
     REFERENCE_QUOTE_POOL_CONFIG_WRITER_LEN == REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN,
     "manual to_bytes writer length must match ReferenceQuotePoolConfigAccount layout size"
+);
+const _: () = assert!(
+    REFERENCE_QUOTE_POOL_CONFIG_SAME_SLOT_ORDER_OFFSET < REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN
 );
 pub const REFERENCE_QUOTE_SWAP_ACCOUNT_META_HEADROOM: u8 =
     REFERENCE_QUOTE_DEFAULT_SWAP_ACCOUNT_META_BUDGET - REFERENCE_QUOTE_REQUIRED_SWAP_ACCOUNT_METAS;
@@ -962,6 +966,10 @@ mod tests {
         assert_eq!(bytes[10], REFERENCE_QUOTE_MODE_ID);
         assert_eq!(bytes[11], 0);
         assert_eq!(bytes[12], 254);
+        assert_eq!(
+            bytes[REFERENCE_QUOTE_POOL_CONFIG_SAME_SLOT_ORDER_OFFSET],
+            account.quote_update_envelope.same_slot_order
+        );
         assert_eq!(bytes[REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN - 2..], [0, 0]);
     }
 
