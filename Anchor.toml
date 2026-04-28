@@ -8,6 +8,9 @@ skip-lint = false
 [programs.localnet]
 meta_amm = "CzVBvCUvx8RWEsiRybEAtr6TwydEn9WByXG7WTezGsq1"
 
+[programs.devnet]
+meta_amm = "CzVBvCUvx8RWEsiRybEAtr6TwydEn9WByXG7WTezGsq1"
+
 [provider]
 cluster = "Localnet"
 wallet = "~/.config/solana/id.json"

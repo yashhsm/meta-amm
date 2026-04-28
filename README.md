@@ -27,6 +27,12 @@ The project direction is:
 - Anchor program slices for initializing ReferenceQuote pool config, quote
   state, and maker-owned vault PDAs
 
+## Devnet
+
+- Program ID: `CzVBvCUvx8RWEsiRybEAtr6TwydEn9WByXG7WTezGsq1`
+- Upgrade authority: `5n1YDbnuU84hH6Vs5JsLeQEXrwGJ6UMadLwcbdfpQLpr`
+- IDL status: initialized on devnet
+
 ## Current Decision
 
 The selected design is a hybrid configurable maker kernel:
@@ -89,7 +95,7 @@ cargo run -p meta_amm_sim --quiet -- --replay-csv tests/fixtures/reference-repla
 ```
 
 The current Anchor program exposes `initialize_reference_quote_pool`,
-`initialize_reference_quote_state`, `update_reference_quote`, and
+`initialize_reference_quote_state`, `update_reference_quote`,
 `initialize_maker_vaults`, and `fund_pool`. Pool init creates a deterministic
 pool-config PDA for an authority/base/quote mint tuple, validates ReferenceQuote
 parameters through the shared bounded config compiler, and stores the resulting
