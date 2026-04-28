@@ -2,7 +2,9 @@
 #![forbid(unsafe_code)]
 
 use anchor_lang::prelude::*;
-use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
+use anchor_spl::token_interface::{
+    transfer_checked, Mint, TokenAccount, TokenInterface, TransferChecked,
+};
 use meta_amm_config::{
     compile_reference_quote_pool_config_account, AccountBudget, ReferenceQuoteConfigInput,
     ReferenceQuoteStrategyConfig, SameSlotUpdateOrder, TokenPairIdentity,
@@ -117,6 +119,50 @@ pub mod meta_amm {
         vault_state.paused = false;
         vault_state._padding = [0; 4];
         vault_state.reserved = [0; 40];
+
+        Ok(())
+    }
+
+    pub fn fund_pool(ctx: Context<FundPool>, args: FundPoolArgs) -> Result<()> {
+        args.validate()?;
+        ctx.accounts.vault_state.assert_maker_owned_for_pool(
+            ctx.accounts.pool_config.key(),
+            ctx.accounts.pool_config.authority,
+            ctx.accounts.base_vault.key(),
+            ctx.accounts.quote_vault.key(),
+        )?;
+
+        if args.base_amount > 0 {
+            transfer_checked(
+                CpiContext::new(
+                    ctx.accounts.base_token_program.to_account_info(),
+                    TransferChecked {
+                        from: ctx.accounts.base_source.to_account_info(),
+                        mint: ctx.accounts.base_mint.to_account_info(),
+                        to: ctx.accounts.base_vault.to_account_info(),
+                        authority: ctx.accounts.authority.to_account_info(),
+                    },
+                ),
+                args.base_amount,
+                ctx.accounts.base_mint.decimals,
+            )?;
+        }
+
+        if args.quote_amount > 0 {
+            transfer_checked(
+                CpiContext::new(
+                    ctx.accounts.quote_token_program.to_account_info(),
+                    TransferChecked {
+                        from: ctx.accounts.quote_source.to_account_info(),
+                        mint: ctx.accounts.quote_mint.to_account_info(),
+                        to: ctx.accounts.quote_vault.to_account_info(),
+                        authority: ctx.accounts.authority.to_account_info(),
+                    },
+                ),
+                args.quote_amount,
+                ctx.accounts.quote_mint.decimals,
+            )?;
+        }
 
         Ok(())
     }
@@ -292,6 +338,91 @@ pub struct InitializeMakerVaults<'info> {
     pub system_program: Program<'info, System>,
 }
 
+#[derive(Accounts)]
+pub struct FundPool<'info> {
+    pub authority: Signer<'info>,
+    #[account(
+        seeds = [
+            POOL_CONFIG_SEED,
+            pool_config.authority.as_ref(),
+            pool_config.base_mint.as_ref(),
+            pool_config.quote_mint.as_ref(),
+        ],
+        bump = pool_config.bump,
+        constraint = pool_config.authority == authority.key() @ MetaAmmError::UnauthorizedPoolAuthority
+    )]
+    pub pool_config: Box<Account<'info, ReferenceQuotePoolConfig>>,
+    /// CHECK: PDA authority only; the token accounts below verify it owns both vaults.
+    #[account(
+        seeds = [
+            VAULT_AUTHORITY_SEED,
+            pool_config.key().as_ref(),
+        ],
+        bump = vault_state.vault_authority_bump
+    )]
+    pub vault_authority: UncheckedAccount<'info>,
+    #[account(
+        seeds = [
+            VAULT_STATE_SEED,
+            pool_config.key().as_ref(),
+        ],
+        bump = vault_state.bump,
+        constraint = vault_state.pool_config == pool_config.key() @ MetaAmmError::VaultStatePoolMismatch,
+        constraint = vault_state.maker_authority == authority.key() @ MetaAmmError::VaultStateAuthorityMismatch,
+        constraint = vault_state.custody_model == CUSTODY_MODEL_MAKER_OWNED @ MetaAmmError::UnsupportedCustodyModel,
+        constraint = !vault_state.paused @ MetaAmmError::VaultPaused
+    )]
+    pub vault_state: Box<Account<'info, VaultState>>,
+    #[account(
+        mint::token_program = base_token_program,
+        constraint = base_mint.key() == pool_config.base_mint @ MetaAmmError::VaultMintMismatch
+    )]
+    pub base_mint: Box<InterfaceAccount<'info, Mint>>,
+    #[account(
+        mint::token_program = quote_token_program,
+        constraint = quote_mint.key() == pool_config.quote_mint @ MetaAmmError::VaultMintMismatch
+    )]
+    pub quote_mint: Box<InterfaceAccount<'info, Mint>>,
+    #[account(
+        constraint = base_token_program.key() == pool_config.base_token_program @ MetaAmmError::VaultTokenProgramMismatch
+    )]
+    pub base_token_program: Interface<'info, TokenInterface>,
+    #[account(
+        constraint = quote_token_program.key() == pool_config.quote_token_program @ MetaAmmError::VaultTokenProgramMismatch
+    )]
+    pub quote_token_program: Interface<'info, TokenInterface>,
+    #[account(
+        mut,
+        token::mint = base_mint,
+        token::authority = authority,
+        token::token_program = base_token_program
+    )]
+    pub base_source: Box<InterfaceAccount<'info, TokenAccount>>,
+    #[account(
+        mut,
+        token::mint = quote_mint,
+        token::authority = authority,
+        token::token_program = quote_token_program
+    )]
+    pub quote_source: Box<InterfaceAccount<'info, TokenAccount>>,
+    #[account(
+        mut,
+        token::mint = base_mint,
+        token::authority = vault_authority,
+        token::token_program = base_token_program,
+        constraint = base_vault.key() == vault_state.base_vault @ MetaAmmError::VaultAccountMismatch
+    )]
+    pub base_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+    #[account(
+        mut,
+        token::mint = quote_mint,
+        token::authority = vault_authority,
+        token::token_program = quote_token_program,
+        constraint = quote_vault.key() == vault_state.quote_vault @ MetaAmmError::VaultAccountMismatch
+    )]
+    pub quote_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+}
+
 #[account]
 #[derive(InitSpace)]
 pub struct ReferenceQuotePoolConfig {
@@ -383,6 +514,45 @@ pub struct VaultState {
     pub paused: bool,
     pub _padding: [u8; 4],
     pub reserved: [u8; 40],
+}
+
+impl VaultState {
+    fn assert_maker_owned_for_pool(
+        &self,
+        pool_config: Pubkey,
+        maker_authority: Pubkey,
+        base_vault: Pubkey,
+        quote_vault: Pubkey,
+    ) -> Result<()> {
+        require_eq!(
+            self.pool_config,
+            pool_config,
+            MetaAmmError::VaultStatePoolMismatch
+        );
+        require_eq!(
+            self.maker_authority,
+            maker_authority,
+            MetaAmmError::VaultStateAuthorityMismatch
+        );
+        require_eq!(
+            self.base_vault,
+            base_vault,
+            MetaAmmError::VaultAccountMismatch
+        );
+        require_eq!(
+            self.quote_vault,
+            quote_vault,
+            MetaAmmError::VaultAccountMismatch
+        );
+        require_eq!(
+            self.custody_model,
+            CUSTODY_MODEL_MAKER_OWNED,
+            MetaAmmError::UnsupportedCustodyModel
+        );
+        require!(!self.paused, MetaAmmError::VaultPaused);
+
+        Ok(())
+    }
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -487,6 +657,22 @@ pub struct UpdateReferenceQuoteArgs {
     pub sequence: u64,
 }
 
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FundPoolArgs {
+    pub base_amount: u64,
+    pub quote_amount: u64,
+}
+
+impl FundPoolArgs {
+    fn validate(self) -> Result<()> {
+        require!(
+            self.base_amount > 0 || self.quote_amount > 0,
+            MetaAmmError::EmptyFundingAmount
+        );
+        Ok(())
+    }
+}
+
 #[error_code]
 pub enum MetaAmmError {
     #[msg("ReferenceQuote config failed bounded compiler validation")]
@@ -515,6 +701,18 @@ pub enum MetaAmmError {
     VaultMintMismatch,
     #[msg("vault token program does not match pool config")]
     VaultTokenProgramMismatch,
+    #[msg("vault state belongs to a different pool config")]
+    VaultStatePoolMismatch,
+    #[msg("vault state authority does not match pool authority")]
+    VaultStateAuthorityMismatch,
+    #[msg("vault token account does not match vault state")]
+    VaultAccountMismatch,
+    #[msg("vault custody model is not supported by this instruction")]
+    UnsupportedCustodyModel,
+    #[msg("vault is paused")]
+    VaultPaused,
+    #[msg("funding amount must include at least one positive side")]
+    EmptyFundingAmount,
 }
 
 #[cfg(test)]
@@ -703,6 +901,70 @@ mod tests {
         assert_eq!(state.custody_model, CUSTODY_MODEL_MAKER_OWNED);
         assert!(!state.paused);
         assert_eq!(state.reserved, [0; 40]);
+    }
+
+    #[test]
+    fn fund_pool_args_reject_zero_sided_noop() {
+        assert!(FundPoolArgs {
+            base_amount: 0,
+            quote_amount: 0
+        }
+        .validate()
+        .is_err());
+        assert!(FundPoolArgs {
+            base_amount: 1,
+            quote_amount: 0
+        }
+        .validate()
+        .is_ok());
+        assert!(FundPoolArgs {
+            base_amount: 0,
+            quote_amount: 1
+        }
+        .validate()
+        .is_ok());
+    }
+
+    #[test]
+    fn vault_state_validates_maker_owned_funding_binding() {
+        let pool = key(1);
+        let maker = key(2);
+        let base_vault = key(3);
+        let quote_vault = key(4);
+        let state = vault_state(pool, maker, base_vault, quote_vault);
+
+        assert!(state
+            .assert_maker_owned_for_pool(pool, maker, base_vault, quote_vault)
+            .is_ok());
+        assert!(state
+            .assert_maker_owned_for_pool(key(9), maker, base_vault, quote_vault)
+            .is_err());
+        assert!(state
+            .assert_maker_owned_for_pool(pool, key(9), base_vault, quote_vault)
+            .is_err());
+        assert!(state
+            .assert_maker_owned_for_pool(pool, maker, key(9), quote_vault)
+            .is_err());
+    }
+
+    #[test]
+    fn vault_state_rejects_paused_or_non_maker_owned_funding() {
+        let pool = key(1);
+        let maker = key(2);
+        let base_vault = key(3);
+        let quote_vault = key(4);
+        let mut state = vault_state(pool, maker, base_vault, quote_vault);
+
+        state.paused = true;
+        assert!(state
+            .assert_maker_owned_for_pool(pool, maker, base_vault, quote_vault)
+            .is_err());
+
+        state.paused = false;
+        state.custody_model = 9;
+        assert!(state
+            .assert_maker_owned_for_pool(pool, maker, base_vault, quote_vault)
+            .is_err());
     }
 
     #[test]
