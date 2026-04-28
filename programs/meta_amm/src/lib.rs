@@ -2,7 +2,7 @@
 #![forbid(unsafe_code)]
 
 use anchor_lang::prelude::*;
-use anchor_spl::token_interface::{Mint, TokenInterface};
+use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
 use meta_amm_config::{
     compile_reference_quote_pool_config_account, AccountBudget, ReferenceQuoteConfigInput,
     ReferenceQuoteStrategyConfig, SameSlotUpdateOrder, TokenPairIdentity,
@@ -14,6 +14,11 @@ declare_id!("CzVBvCUvx8RWEsiRybEAtr6TwydEn9WByXG7WTezGsq1");
 
 pub const POOL_CONFIG_SEED: &[u8] = b"pool-config";
 pub const QUOTE_STATE_SEED: &[u8] = b"quote-state";
+pub const VAULT_STATE_SEED: &[u8] = b"vault-state";
+pub const VAULT_AUTHORITY_SEED: &[u8] = b"vault-authority";
+pub const BASE_VAULT_SEED: &[u8] = b"base-vault";
+pub const QUOTE_VAULT_SEED: &[u8] = b"quote-vault";
+pub const CUSTODY_MODEL_MAKER_OWNED: u8 = 0;
 
 #[program]
 pub mod meta_amm {
@@ -97,6 +102,24 @@ pub mod meta_amm {
             current_slot,
         )
     }
+
+    pub fn initialize_maker_vaults(ctx: Context<InitializeMakerVaults>) -> Result<()> {
+        let vault_state = &mut ctx.accounts.vault_state;
+        vault_state.pool_config = ctx.accounts.pool_config.key();
+        vault_state.maker_authority = ctx.accounts.pool_config.authority;
+        vault_state.base_vault = ctx.accounts.base_vault.key();
+        vault_state.quote_vault = ctx.accounts.quote_vault.key();
+        vault_state.base_mint = ctx.accounts.base_mint.key();
+        vault_state.quote_mint = ctx.accounts.quote_mint.key();
+        vault_state.vault_authority_bump = ctx.bumps.vault_authority;
+        vault_state.bump = ctx.bumps.vault_state;
+        vault_state.custody_model = CUSTODY_MODEL_MAKER_OWNED;
+        vault_state.paused = false;
+        vault_state._padding = [0; 4];
+        vault_state.reserved = [0; 40];
+
+        Ok(())
+    }
 }
 
 #[derive(Accounts)]
@@ -123,7 +146,7 @@ pub struct InitializeReferenceQuotePool<'info> {
         ],
         bump
     )]
-    pub pool_config: Account<'info, ReferenceQuotePoolConfig>,
+    pub pool_config: Box<Account<'info, ReferenceQuotePoolConfig>>,
     pub system_program: Program<'info, System>,
 }
 
@@ -144,7 +167,7 @@ pub struct InitializeReferenceQuoteState<'info> {
         ],
         bump = pool_config.bump
     )]
-    pub pool_config: Account<'info, ReferenceQuotePoolConfig>,
+    pub pool_config: Box<Account<'info, ReferenceQuotePoolConfig>>,
     #[account(
         init,
         payer = payer,
@@ -182,6 +205,91 @@ pub struct UpdateReferenceQuote<'info> {
         constraint = quote_state.pool_config == pool_config.key() @ MetaAmmError::QuoteStatePoolMismatch
     )]
     pub quote_state: Account<'info, ReferenceQuoteState>,
+}
+
+#[derive(Accounts)]
+pub struct InitializeMakerVaults<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(
+        constraint = pool_config.authority == authority.key() @ MetaAmmError::UnauthorizedPoolAuthority
+    )]
+    pub authority: Signer<'info>,
+    #[account(
+        seeds = [
+            POOL_CONFIG_SEED,
+            pool_config.authority.as_ref(),
+            pool_config.base_mint.as_ref(),
+            pool_config.quote_mint.as_ref(),
+        ],
+        bump = pool_config.bump
+    )]
+    pub pool_config: Box<Account<'info, ReferenceQuotePoolConfig>>,
+    /// CHECK: PDA authority only; never stores data and only signs token CPIs through seeds.
+    #[account(
+        seeds = [
+            VAULT_AUTHORITY_SEED,
+            pool_config.key().as_ref(),
+        ],
+        bump
+    )]
+    pub vault_authority: UncheckedAccount<'info>,
+    #[account(
+        mint::token_program = base_token_program,
+        constraint = base_mint.key() == pool_config.base_mint @ MetaAmmError::VaultMintMismatch
+    )]
+    pub base_mint: Box<InterfaceAccount<'info, Mint>>,
+    #[account(
+        mint::token_program = quote_token_program,
+        constraint = quote_mint.key() == pool_config.quote_mint @ MetaAmmError::VaultMintMismatch
+    )]
+    pub quote_mint: Box<InterfaceAccount<'info, Mint>>,
+    #[account(
+        constraint = base_token_program.key() == pool_config.base_token_program @ MetaAmmError::VaultTokenProgramMismatch
+    )]
+    pub base_token_program: Interface<'info, TokenInterface>,
+    #[account(
+        constraint = quote_token_program.key() == pool_config.quote_token_program @ MetaAmmError::VaultTokenProgramMismatch
+    )]
+    pub quote_token_program: Interface<'info, TokenInterface>,
+    #[account(
+        init,
+        payer = payer,
+        space = 8 + VaultState::INIT_SPACE,
+        seeds = [
+            VAULT_STATE_SEED,
+            pool_config.key().as_ref(),
+        ],
+        bump
+    )]
+    pub vault_state: Box<Account<'info, VaultState>>,
+    #[account(
+        init,
+        payer = payer,
+        token::mint = base_mint,
+        token::authority = vault_authority,
+        token::token_program = base_token_program,
+        seeds = [
+            BASE_VAULT_SEED,
+            pool_config.key().as_ref(),
+        ],
+        bump
+    )]
+    pub base_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+    #[account(
+        init,
+        payer = payer,
+        token::mint = quote_mint,
+        token::authority = vault_authority,
+        token::token_program = quote_token_program,
+        seeds = [
+            QUOTE_VAULT_SEED,
+            pool_config.key().as_ref(),
+        ],
+        bump
+    )]
+    pub quote_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+    pub system_program: Program<'info, System>,
 }
 
 #[account]
@@ -258,6 +366,23 @@ impl ReferenceQuoteState {
 
         Ok(())
     }
+}
+
+#[account]
+#[derive(InitSpace)]
+pub struct VaultState {
+    pub pool_config: Pubkey,
+    pub maker_authority: Pubkey,
+    pub base_vault: Pubkey,
+    pub quote_vault: Pubkey,
+    pub base_mint: Pubkey,
+    pub quote_mint: Pubkey,
+    pub vault_authority_bump: u8,
+    pub bump: u8,
+    pub custody_model: u8,
+    pub paused: bool,
+    pub _padding: [u8; 4],
+    pub reserved: [u8; 40],
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -386,6 +511,10 @@ pub enum MetaAmmError {
     QuoteStatePoolMismatch,
     #[msg("quote state ordering metadata does not match pool config")]
     QuoteStateOrderMismatch,
+    #[msg("vault mint does not match pool config")]
+    VaultMintMismatch,
+    #[msg("vault token program does not match pool config")]
+    VaultTokenProgramMismatch,
 }
 
 #[cfg(test)]
@@ -476,6 +605,28 @@ mod tests {
         }
     }
 
+    fn vault_state(
+        pool_config: Pubkey,
+        maker_authority: Pubkey,
+        base_vault: Pubkey,
+        quote_vault: Pubkey,
+    ) -> VaultState {
+        VaultState {
+            pool_config,
+            maker_authority,
+            base_vault,
+            quote_vault,
+            base_mint: key(2),
+            quote_mint: key(3),
+            vault_authority_bump: 252,
+            bump: 251,
+            custody_model: CUSTODY_MODEL_MAKER_OWNED,
+            paused: false,
+            _padding: [0; 4],
+            reserved: [0; 40],
+        }
+    }
+
     fn update_args(sequence: u64, publish_slot: u64) -> UpdateReferenceQuoteArgs {
         UpdateReferenceQuoteArgs {
             mid_price_q64x64: 30_000u128 << 64,
@@ -517,6 +668,41 @@ mod tests {
             ReferenceQuoteState::INIT_SPACE,
             32 + 32 + 1 + 1 + 1 + 5 + 16 + 8 + 8 + 8
         );
+    }
+
+    #[test]
+    fn vault_state_account_space_is_stable() {
+        assert_eq!(
+            VaultState::INIT_SPACE,
+            32 + 32 + 32 + 32 + 32 + 32 + 1 + 1 + 1 + 1 + 4 + 40
+        );
+    }
+
+    #[test]
+    fn vault_pda_seeds_are_pool_scoped_and_distinct() {
+        let pool = key(9);
+        let (vault_authority, _) =
+            Pubkey::find_program_address(&[VAULT_AUTHORITY_SEED, pool.as_ref()], &crate::ID);
+        let (vault_state, _) =
+            Pubkey::find_program_address(&[VAULT_STATE_SEED, pool.as_ref()], &crate::ID);
+        let (base_vault, _) =
+            Pubkey::find_program_address(&[BASE_VAULT_SEED, pool.as_ref()], &crate::ID);
+        let (quote_vault, _) =
+            Pubkey::find_program_address(&[QUOTE_VAULT_SEED, pool.as_ref()], &crate::ID);
+
+        assert_ne!(vault_authority, vault_state);
+        assert_ne!(base_vault, quote_vault);
+        assert_ne!(vault_authority, base_vault);
+        assert_ne!(vault_state, quote_vault);
+    }
+
+    #[test]
+    fn maker_owned_vault_state_keeps_future_custody_bytes_reserved() {
+        let state = vault_state(key(1), key(2), key(3), key(4));
+
+        assert_eq!(state.custody_model, CUSTODY_MODEL_MAKER_OWNED);
+        assert!(!state.paused);
+        assert_eq!(state.reserved, [0; 40]);
     }
 
     #[test]

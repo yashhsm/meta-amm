@@ -24,8 +24,8 @@ The project direction is:
 - [Selected architecture](docs/architecture/architecture.md)
 - [Implementation-slice review](docs/architecture/implementation-slice-review.md)
 - [MVP roadmap](docs/roadmap/mvp-roadmap.md)
-- Anchor program slices for initializing ReferenceQuote pool config and quote
-  state PDAs
+- Anchor program slices for initializing ReferenceQuote pool config, quote
+  state, and maker-owned vault PDAs
 
 ## Current Decision
 
@@ -89,13 +89,15 @@ cargo run -p meta_amm_sim --quiet -- --replay-csv tests/fixtures/reference-repla
 ```
 
 The current Anchor program exposes `initialize_reference_quote_pool`,
-`initialize_reference_quote_state`, and `update_reference_quote`. Pool init
-creates a deterministic pool-config PDA for an authority/base/quote mint tuple,
-validates ReferenceQuote parameters through the shared bounded config compiler,
-and stores the resulting fixed-size config-layout bytes in the Anchor account.
-Quote-state init binds a quote authority and same-slot ordering metadata to the
-pool config. Quote updates are signer-gated and require monotonic sequence plus
-non-backdated publish slots. Token vault custody and swap execution remain
+`initialize_reference_quote_state`, `update_reference_quote`, and
+`initialize_maker_vaults`. Pool init creates a deterministic pool-config PDA for
+an authority/base/quote mint tuple, validates ReferenceQuote parameters through
+the shared bounded config compiler, and stores the resulting fixed-size
+config-layout bytes in the Anchor account. Quote-state init binds a quote
+authority and same-slot ordering metadata to the pool config. Quote updates are
+signer-gated and require monotonic sequence plus non-backdated publish slots.
+Maker-vault init creates deterministic PDA-owned base and quote token accounts
+for the pool and records them in `VaultState`. Funding and swap execution remain
 separate slices so account budgets and trust boundaries stay explicit.
 
 The current simulator binary is a deterministic multi-path smoke scenario for
