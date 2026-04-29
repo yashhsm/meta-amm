@@ -100,17 +100,20 @@ pnpm surfpool:smoke
 
 The current Anchor program exposes `initialize_reference_quote_pool`,
 `initialize_reference_quote_state`, `update_reference_quote`,
-`initialize_maker_vaults`, `fund_pool`, and `swap_exact_in`. Pool init creates
-a deterministic pool-config PDA for an authority/base/quote mint tuple, validates ReferenceQuote
-parameters through the shared bounded config compiler, and stores the resulting
-fixed-size config-layout bytes in the Anchor account. Quote-state init binds a
-quote authority and same-slot ordering metadata to the pool config. Quote
+`pause_pool`, `initialize_maker_vaults`, `fund_pool`, and `swap_exact_in`. Pool
+init creates a deterministic pool-config PDA for an authority/base/quote mint
+tuple, validates ReferenceQuote parameters through the shared bounded config
+compiler, and stores the resulting fixed-size config-layout bytes in the Anchor
+account. Quote-state init binds a quote authority and same-slot ordering
+metadata to the pool config. Quote
 updates are signer-gated and require monotonic sequence plus non-backdated
-publish slots. Maker-vault init creates deterministic PDA-owned base and quote
-token accounts for the pool and records them in `VaultState`. Funding moves
-authority-owned tokens into those vaults with checked token-interface transfers.
-Swap execution requires an initialized quote, an exact expected quote sequence,
-minimum output, and checked token-interface transfers in both directions.
+publish slots. Pool pause is authority-gated and stops swaps without blocking
+quote refreshes or maker funding. Maker-vault init creates deterministic
+PDA-owned base and quote token accounts for the pool and records them in
+`VaultState`. Funding moves authority-owned tokens into those vaults with
+checked token-interface transfers. Swap execution requires an initialized
+quote, an exact expected quote sequence, minimum output, and checked
+token-interface transfers in both directions.
 
 The current simulator binary is a deterministic multi-path smoke scenario for
 CPMM and ReferenceQuote. ReferenceQuote now models quote landing latency,

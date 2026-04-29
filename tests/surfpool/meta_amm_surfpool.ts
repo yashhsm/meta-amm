@@ -288,6 +288,22 @@ async function updateQuote(
     .rpc();
 }
 
+async function pausePool(
+  program: anchor.Program,
+  context: PoolContext,
+  authority: Keypair,
+  paused: boolean,
+) {
+  await program.methods
+    .pausePool({ paused })
+    .accounts({
+      authority: authority.publicKey,
+      poolConfig: context.poolConfig,
+    })
+    .signers([authority])
+    .rpc();
+}
+
 async function createFundedSource(
   connection: anchor.web3.Connection,
   payer: Keypair,
@@ -561,6 +577,11 @@ async function runLocalSplCase(
     () => updateQuote(program, context, Keypair.generate(), 2, slot),
     /UnauthorizedQuoteUpdate|6004|custom program error/,
   );
+  await expectReject(
+    "rejects unauthorized pool pause",
+    () => pausePool(program, context, Keypair.generate(), true),
+    /UnauthorizedPoolAuthority|6002|custom program error/,
+  );
 
   await initializeVaults(program, payer, context);
   await expectReject(
@@ -758,6 +779,25 @@ async function runLocalSplCase(
     () => swapExactIn(program, context, taker, 100n, 1n, 2n, true),
     /QuoteSequenceMismatch|6022|custom program error/,
   );
+
+  await pausePool(program, context, authority, true);
+  const pausedBaseBefore = await tokenAmount(
+    provider.connection,
+    takerBase,
+    TOKEN_PROGRAM_ID,
+  );
+  await expectReject(
+    "rejects swaps while pool is paused",
+    () => swapExactIn(program, context, taker, 100n, 1n, 3n, true),
+    /PoolConfigPaused|6019|custom program error/,
+  );
+  await assertTokenAmount(
+    provider.connection,
+    takerBase,
+    pausedBaseBefore,
+    TOKEN_PROGRAM_ID,
+  );
+  await pausePool(program, context, authority, false);
 
   const userBaseBeforeReverse = await tokenAmount(
     provider.connection,

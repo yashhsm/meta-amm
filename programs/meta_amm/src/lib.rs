@@ -109,6 +109,11 @@ pub mod meta_amm {
         )
     }
 
+    pub fn pause_pool(ctx: Context<PausePool>, args: PausePoolArgs) -> Result<()> {
+        ctx.accounts.pool_config.paused = args.paused;
+        Ok(())
+    }
+
     pub fn initialize_maker_vaults(ctx: Context<InitializeMakerVaults>) -> Result<()> {
         let vault_state = &mut ctx.accounts.vault_state;
         vault_state.pool_config = ctx.accounts.pool_config.key();
@@ -377,6 +382,25 @@ pub struct UpdateReferenceQuote<'info> {
         constraint = quote_state.pool_config == pool_config.key() @ MetaAmmError::QuoteStatePoolMismatch
     )]
     pub quote_state: Account<'info, ReferenceQuoteState>,
+}
+
+#[derive(Accounts)]
+pub struct PausePool<'info> {
+    #[account(
+        constraint = pool_config.authority == authority.key() @ MetaAmmError::UnauthorizedPoolAuthority
+    )]
+    pub authority: Signer<'info>,
+    #[account(
+        mut,
+        seeds = [
+            POOL_CONFIG_SEED,
+            pool_config.authority.as_ref(),
+            pool_config.base_mint.as_ref(),
+            pool_config.quote_mint.as_ref(),
+        ],
+        bump = pool_config.bump
+    )]
+    pub pool_config: Box<Account<'info, ReferenceQuotePoolConfig>>,
 }
 
 #[derive(Accounts)]
@@ -937,6 +961,11 @@ pub struct UpdateReferenceQuoteArgs {
     pub mid_price_q64x64: u128,
     pub publish_slot: u64,
     pub sequence: u64,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PausePoolArgs {
+    pub paused: bool,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]

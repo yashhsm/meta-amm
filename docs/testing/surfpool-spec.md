@@ -7,6 +7,7 @@ today:
 - `initialize_reference_quote_pool`
 - `initialize_reference_quote_state`
 - `update_reference_quote`
+- `pause_pool`
 - `initialize_maker_vaults`
 - `fund_pool`
 - `swap_exact_in`
@@ -46,6 +47,8 @@ control of the real USDC mint authority.
 13. Expired ReferenceQuote state must reject swaps.
 14. Vault and user token balances must conserve exactly across both swap
     directions.
+15. Pool pause must be authority-gated and must reject swaps without moving
+    tokens.
 
 ## Cases
 
@@ -70,6 +73,7 @@ After one valid quote update:
 - publish a future slot and expect rejection;
 - submit an update from an unauthorized signer and expect rejection.
 - bind a swap to an old quote sequence after a refresh and expect rejection.
+- submit a pool pause from an unauthorized signer and expect rejection.
 
 ### Custody Adversarial Cases
 
@@ -80,6 +84,8 @@ After vault initialization:
   account validation failure.
 - request an impossible `minimum_amount_out` and expect rejection before token
   movement.
+- pause the pool, attempt a swap, and expect rejection before token movement;
+  unpause and verify swaps resume.
 
 ### Token-2022 Compatibility
 
