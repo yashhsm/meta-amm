@@ -9,13 +9,14 @@ use meta_amm_math::{
 pub const CONFIG_SCHEMA_VERSION: u16 = 1;
 pub const BASIS_POINTS: u16 = 10_000;
 pub const REFERENCE_QUOTE_MODE_ID: u8 = 1;
-pub const REFERENCE_QUOTE_REQUIRED_SWAP_ACCOUNT_METAS: u8 = 10;
-pub const REFERENCE_QUOTE_DEFAULT_SWAP_ACCOUNT_META_BUDGET: u8 = 12;
+pub const REFERENCE_QUOTE_REQUIRED_SWAP_ACCOUNT_METAS: u8 = 13;
+pub const REFERENCE_QUOTE_DEFAULT_SWAP_ACCOUNT_META_BUDGET: u8 = 15;
 pub const REFERENCE_QUOTE_POOL_CONFIG_DISCRIMINATOR: [u8; 8] = *b"MAMMCFG1";
 pub const REFERENCE_QUOTE_POOL_CONFIG_RESERVED_BYTES: usize = 64;
 pub const REFERENCE_QUOTE_POOL_CONFIG_MAX_BYTES: usize = 512;
 pub const REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN: usize =
     core::mem::size_of::<ReferenceQuotePoolConfigAccount>();
+pub const REFERENCE_QUOTE_POOL_CONFIG_PARAMS_OFFSET: usize = 8 + 8;
 pub const REFERENCE_QUOTE_POOL_CONFIG_SAME_SLOT_ORDER_OFFSET: usize = 8 + 8 + 56 + 8 + 8 + 2;
 
 /// Byte sum the manual `to_bytes` writer emits, computed independently of
@@ -366,6 +367,28 @@ impl ReferenceQuotePoolConfigAccount {
     }
 }
 
+pub fn reference_quote_params_from_pool_config_bytes(
+    source: &[u8; REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN],
+) -> ReferenceQuoteParams {
+    let mut offset = REFERENCE_QUOTE_POOL_CONFIG_PARAMS_OFFSET;
+    let layout = ReferenceQuoteParamsLayout {
+        aging_start_slots: read_u64(source, &mut offset),
+        protected_start_slots: read_u64(source, &mut offset),
+        expire_slots: read_u64(source, &mut offset),
+        max_trade_base_atoms: read_u64(source, &mut offset),
+        protected_max_trade_base_atoms: read_u64(source, &mut offset),
+        fee_bps: read_u16(source, &mut offset),
+        base_half_spread_bps: read_u16(source, &mut offset),
+        aging_surcharge_bps_per_slot: read_u16(source, &mut offset),
+        max_aging_surcharge_bps: read_u16(source, &mut offset),
+        inventory_skew_bps_per_10k_imbalance: read_u16(source, &mut offset),
+        max_inventory_skew_bps: read_u16(source, &mut offset),
+        hard_inventory_band_bps: read_u16(source, &mut offset),
+        _padding: read_2(source, &mut offset),
+    };
+    layout.to_params()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigError {
     BpsOutOfRange(BpsField),
@@ -671,6 +694,27 @@ fn put_bytes<const OUT: usize, const INPUT: usize>(
     *offset += INPUT;
 }
 
+fn read_u64<const N: usize>(source: &[u8; N], offset: &mut usize) -> u64 {
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(&source[*offset..*offset + 8]);
+    *offset += 8;
+    u64::from_le_bytes(bytes)
+}
+
+fn read_u16<const N: usize>(source: &[u8; N], offset: &mut usize) -> u16 {
+    let mut bytes = [0u8; 2];
+    bytes.copy_from_slice(&source[*offset..*offset + 2]);
+    *offset += 2;
+    u16::from_le_bytes(bytes)
+}
+
+fn read_2<const N: usize>(source: &[u8; N], offset: &mut usize) -> [u8; 2] {
+    let mut bytes = [0u8; 2];
+    bytes.copy_from_slice(&source[*offset..*offset + 2]);
+    *offset += 2;
+    bytes
+}
+
 const fn same_slot_update_order_to_u8(order: SameSlotUpdateOrder) -> u8 {
     match order {
         SameSlotUpdateOrder::UpdateBeforeSwap => 0,
@@ -947,8 +991,14 @@ mod tests {
                 .min_update_success_probability_bps
         );
         assert_eq!(account.quote_update_envelope.same_slot_order, 1);
-        assert_eq!(account.account_budget.required_swap_account_metas, 10);
-        assert_eq!(account.account_budget.max_swap_account_metas, 12);
+        assert_eq!(
+            account.account_budget.required_swap_account_metas,
+            REFERENCE_QUOTE_REQUIRED_SWAP_ACCOUNT_METAS
+        );
+        assert_eq!(
+            account.account_budget.max_swap_account_metas,
+            REFERENCE_QUOTE_DEFAULT_SWAP_ACCOUNT_META_BUDGET
+        );
         assert_eq!(account.base_mint, token_pair().base_mint);
         assert_eq!(
             account.decimal_scale_preimage,
@@ -971,6 +1021,23 @@ mod tests {
             account.quote_update_envelope.same_slot_order
         );
         assert_eq!(bytes[REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN - 2..], [0, 0]);
+    }
+
+    #[test]
+    fn parses_reference_quote_params_from_pool_config_bytes() {
+        let account = compile_reference_quote_export_account(
+            REFERENCE_QUOTE_EXPORT_FIXTURE,
+            token_pair(),
+            AccountBudget::reference_quote_jupiter_default(),
+            254,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            reference_quote_params_from_pool_config_bytes(&account.to_bytes()),
+            params()
+        );
     }
 
     #[test]
@@ -1097,8 +1164,8 @@ mod tests {
             strategy: strategy(),
             token_pair: token_pair(),
             account_budget: AccountBudget {
-                required_swap_account_metas: 9,
-                max_swap_account_metas: 12,
+                required_swap_account_metas: REFERENCE_QUOTE_REQUIRED_SWAP_ACCOUNT_METAS - 1,
+                max_swap_account_metas: REFERENCE_QUOTE_DEFAULT_SWAP_ACCOUNT_META_BUDGET,
             },
         })
         .unwrap_err();
@@ -1108,8 +1175,8 @@ mod tests {
             strategy: strategy(),
             token_pair: token_pair(),
             account_budget: AccountBudget {
-                required_swap_account_metas: 13,
-                max_swap_account_metas: 12,
+                required_swap_account_metas: REFERENCE_QUOTE_REQUIRED_SWAP_ACCOUNT_METAS,
+                max_swap_account_metas: REFERENCE_QUOTE_REQUIRED_SWAP_ACCOUNT_METAS - 1,
             },
         })
         .unwrap_err();

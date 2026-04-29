@@ -88,8 +88,8 @@ function baseArgs() {
       sameSlotOrder: 1,
     },
     accountBudget: {
-      requiredSwapAccountMetas: 10,
-      maxSwapAccountMetas: 12,
+      requiredSwapAccountMetas: 13,
+      maxSwapAccountMetas: 15,
     },
   };
 }
@@ -410,6 +410,67 @@ async function fundPool(
     .rpc();
 }
 
+async function swapExactIn(
+  program: anchor.Program,
+  context: PoolContext,
+  taker: Keypair,
+  amountIn: bigint,
+  minimumAmountOut: bigint,
+  expectedQuoteSequence: bigint,
+  baseToQuote: boolean,
+) {
+  await program.methods
+    .swapExactIn({
+      amountIn: new anchor.BN(amountIn.toString()),
+      minimumAmountOut: new anchor.BN(minimumAmountOut.toString()),
+      expectedQuoteSequence: new anchor.BN(expectedQuoteSequence.toString()),
+      baseToQuote,
+    })
+    .accounts({
+      taker: taker.publicKey,
+      poolConfig: context.poolConfig,
+      quoteState: context.quoteState,
+      vaultAuthority: context.vaultAuthority,
+      vaultState: context.vaultState,
+      baseMint: context.baseMint,
+      quoteMint: context.quoteMint,
+      baseTokenProgram: context.baseTokenProgram,
+      quoteTokenProgram: context.quoteTokenProgram,
+      userBaseAccount: getAssociatedTokenAddressSync(
+        context.baseMint,
+        taker.publicKey,
+        false,
+        context.baseTokenProgram,
+        ASSOCIATED_TOKEN_PROGRAM_ID,
+      ),
+      userQuoteAccount: getAssociatedTokenAddressSync(
+        context.quoteMint,
+        taker.publicKey,
+        false,
+        context.quoteTokenProgram,
+        ASSOCIATED_TOKEN_PROGRAM_ID,
+      ),
+      baseVault: context.baseVault,
+      quoteVault: context.quoteVault,
+    })
+    .signers([taker])
+    .rpc();
+}
+
+async function tokenAmount(
+  connection: anchor.web3.Connection,
+  account: PublicKey,
+  tokenProgram: TokenProgramId,
+): Promise<bigint> {
+  const tokenAccount = await getAccount(
+    connection,
+    account,
+    "confirmed",
+    tokenProgram,
+  );
+  return tokenAccount.amount;
+}
+
 async function assertTokenAmount(
   connection: anchor.web3.Connection,
   account: PublicKey,
@@ -423,6 +484,19 @@ async function assertTokenAmount(
     tokenProgram,
   );
   assert.equal(tokenAccount.amount, expected);
+}
+
+async function waitForSlot(
+  connection: anchor.web3.Connection,
+  targetSlot: number,
+) {
+  for (;;) {
+    const slot = await connection.getSlot("confirmed");
+    if (slot >= targetSlot) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
 }
 
 async function runLocalSplCase(
@@ -580,6 +654,160 @@ async function runLocalSplCase(
     3_750_000n,
     TOKEN_PROGRAM_ID,
   );
+
+  const swapQuoteSlot = await provider.connection.getSlot("confirmed");
+  await updateQuote(program, context, quoteAuthority, 2, swapQuoteSlot);
+
+  const taker = await fundedAuthority(provider.connection);
+  const takerBase = await createFundedSource(
+    provider.connection,
+    payer,
+    authority,
+    taker.publicKey,
+    baseMint,
+    100_000_000n,
+    TOKEN_PROGRAM_ID,
+  );
+  const takerQuote = await createFundedSource(
+    provider.connection,
+    payer,
+    authority,
+    taker.publicKey,
+    quoteMint,
+    100_000n,
+    TOKEN_PROGRAM_ID,
+  );
+
+  const unchangedBefore = await tokenAmount(
+    provider.connection,
+    takerBase,
+    TOKEN_PROGRAM_ID,
+  );
+  await expectReject(
+    "rejects swap below requested minimum output",
+    () => swapExactIn(program, context, taker, 100n, 1_000_000n, 2n, true),
+    /SlippageExceeded|6025|custom program error/,
+  );
+  await assertTokenAmount(
+    provider.connection,
+    takerBase,
+    unchangedBefore,
+    TOKEN_PROGRAM_ID,
+  );
+
+  const userBaseBefore = await tokenAmount(
+    provider.connection,
+    takerBase,
+    TOKEN_PROGRAM_ID,
+  );
+  const userQuoteBefore = await tokenAmount(
+    provider.connection,
+    takerQuote,
+    TOKEN_PROGRAM_ID,
+  );
+  const vaultBaseBefore = await tokenAmount(
+    provider.connection,
+    context.baseVault,
+    TOKEN_PROGRAM_ID,
+  );
+  const vaultQuoteBefore = await tokenAmount(
+    provider.connection,
+    context.quoteVault,
+    TOKEN_PROGRAM_ID,
+  );
+
+  await swapExactIn(program, context, taker, 100n, 90n, 2n, true);
+
+  const userBaseAfter = await tokenAmount(
+    provider.connection,
+    takerBase,
+    TOKEN_PROGRAM_ID,
+  );
+  const userQuoteAfter = await tokenAmount(
+    provider.connection,
+    takerQuote,
+    TOKEN_PROGRAM_ID,
+  );
+  const vaultBaseAfter = await tokenAmount(
+    provider.connection,
+    context.baseVault,
+    TOKEN_PROGRAM_ID,
+  );
+  const vaultQuoteAfter = await tokenAmount(
+    provider.connection,
+    context.quoteVault,
+    TOKEN_PROGRAM_ID,
+  );
+  const quoteOut = userQuoteAfter - userQuoteBefore;
+  assert.equal(userBaseBefore - userBaseAfter, 100n);
+  assert.equal(vaultBaseAfter - vaultBaseBefore, 100n);
+  assert.equal(vaultQuoteBefore - vaultQuoteAfter, quoteOut);
+  assert(quoteOut >= 90n);
+
+  await waitForSlot(provider.connection, swapQuoteSlot + 16);
+  await expectReject(
+    "rejects stale quote swaps",
+    () => swapExactIn(program, context, taker, 100n, 1n, 2n, true),
+    /StaleReferenceQuote|6029|custom program error/,
+  );
+
+  const refreshedSlot = await provider.connection.getSlot("confirmed");
+  await updateQuote(program, context, quoteAuthority, 3, refreshedSlot);
+  await expectReject(
+    "rejects swap bound to superseded quote sequence",
+    () => swapExactIn(program, context, taker, 100n, 1n, 2n, true),
+    /QuoteSequenceMismatch|6022|custom program error/,
+  );
+
+  const userBaseBeforeReverse = await tokenAmount(
+    provider.connection,
+    takerBase,
+    TOKEN_PROGRAM_ID,
+  );
+  const userQuoteBeforeReverse = await tokenAmount(
+    provider.connection,
+    takerQuote,
+    TOKEN_PROGRAM_ID,
+  );
+  const vaultBaseBeforeReverse = await tokenAmount(
+    provider.connection,
+    context.baseVault,
+    TOKEN_PROGRAM_ID,
+  );
+  const vaultQuoteBeforeReverse = await tokenAmount(
+    provider.connection,
+    context.quoteVault,
+    TOKEN_PROGRAM_ID,
+  );
+
+  await swapExactIn(program, context, taker, 100n, 90n, 3n, false);
+
+  const userBaseAfterReverse = await tokenAmount(
+    provider.connection,
+    takerBase,
+    TOKEN_PROGRAM_ID,
+  );
+  const userQuoteAfterReverse = await tokenAmount(
+    provider.connection,
+    takerQuote,
+    TOKEN_PROGRAM_ID,
+  );
+  const vaultBaseAfterReverse = await tokenAmount(
+    provider.connection,
+    context.baseVault,
+    TOKEN_PROGRAM_ID,
+  );
+  const vaultQuoteAfterReverse = await tokenAmount(
+    provider.connection,
+    context.quoteVault,
+    TOKEN_PROGRAM_ID,
+  );
+  const baseOut = userBaseAfterReverse - userBaseBeforeReverse;
+  assert.equal(userQuoteBeforeReverse - userQuoteAfterReverse, 100n);
+  assert.equal(vaultQuoteAfterReverse - vaultQuoteBeforeReverse, 100n);
+  assert.equal(vaultBaseBeforeReverse - vaultBaseAfterReverse, baseOut);
+  assert(baseOut >= 90n);
+
   console.log("ok: local SPL pool quote, vault, and funding invariants");
 }
 

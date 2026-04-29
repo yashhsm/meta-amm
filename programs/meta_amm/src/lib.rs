@@ -6,11 +6,15 @@ use anchor_spl::token_interface::{
     transfer_checked, Mint, TokenAccount, TokenInterface, TransferChecked,
 };
 use meta_amm_config::{
-    compile_reference_quote_pool_config_account, AccountBudget, ReferenceQuoteConfigInput,
-    ReferenceQuoteStrategyConfig, SameSlotUpdateOrder, TokenPairIdentity,
-    REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN, REFERENCE_QUOTE_POOL_CONFIG_SAME_SLOT_ORDER_OFFSET,
+    compile_reference_quote_pool_config_account, reference_quote_params_from_pool_config_bytes,
+    AccountBudget, ReferenceQuoteConfigInput, ReferenceQuoteStrategyConfig, SameSlotUpdateOrder,
+    TokenPairIdentity, REFERENCE_QUOTE_POOL_CONFIG_ACCOUNT_LEN,
+    REFERENCE_QUOTE_POOL_CONFIG_SAME_SLOT_ORDER_OFFSET,
 };
-use meta_amm_math::ReferenceQuoteParams;
+use meta_amm_math::{
+    reference_quote_exact_in, MathError, Q64x64, ReferenceQuoteParams,
+    ReferenceQuoteState as MathReferenceQuoteState,
+};
 
 declare_id!("CzVBvCUvx8RWEsiRybEAtr6TwydEn9WByXG7WTezGsq1");
 
@@ -118,7 +122,8 @@ pub mod meta_amm {
         vault_state.custody_model = CUSTODY_MODEL_MAKER_OWNED;
         vault_state.paused = false;
         vault_state._padding = [0; 4];
-        vault_state.reserved = [0; 40];
+        vault_state.target_base_inventory = 0;
+        vault_state.reserved = [0; 32];
 
         Ok(())
     }
@@ -161,6 +166,127 @@ pub mod meta_amm {
                 ),
                 args.quote_amount,
                 ctx.accounts.quote_mint.decimals,
+            )?;
+        }
+
+        ctx.accounts
+            .vault_state
+            .apply_base_funding_to_target(ctx.accounts.base_vault.amount, args.base_amount)?;
+
+        Ok(())
+    }
+
+    pub fn swap_exact_in(ctx: Context<SwapExactIn>, args: SwapExactInArgs) -> Result<()> {
+        args.validate()?;
+        ctx.accounts.quote_state.assert_usable_for_swap(
+            ctx.accounts.pool_config.key(),
+            ctx.accounts.pool_config.reference_quote_same_slot_order()?,
+            args.expected_quote_sequence,
+            Clock::get()?.slot,
+        )?;
+        ctx.accounts.vault_state.assert_maker_owned_for_pool(
+            ctx.accounts.pool_config.key(),
+            ctx.accounts.pool_config.authority,
+            ctx.accounts.base_vault.key(),
+            ctx.accounts.quote_vault.key(),
+        )?;
+        require!(
+            !ctx.accounts.pool_config.paused,
+            MetaAmmError::PoolConfigPaused
+        );
+        require!(
+            ctx.accounts.vault_state.target_base_inventory > 0,
+            MetaAmmError::UninitializedInventoryTarget
+        );
+
+        let now_slot = Clock::get()?.slot;
+        let quote = reference_quote_exact_in(
+            MathReferenceQuoteState {
+                base_inventory: ctx.accounts.base_vault.amount,
+                quote_inventory: ctx.accounts.quote_vault.amount,
+                target_base_inventory: ctx.accounts.vault_state.target_base_inventory,
+                mid_price: Q64x64(ctx.accounts.quote_state.mid_price_q64x64),
+                mid_publish_slot: ctx.accounts.quote_state.publish_slot,
+                now_slot,
+                paused: ctx.accounts.pool_config.paused
+                    || ctx.accounts.quote_state.paused
+                    || ctx.accounts.vault_state.paused,
+            },
+            ctx.accounts.pool_config.reference_quote_params(),
+            args.amount_in,
+            args.base_to_quote,
+        )
+        .map_err(map_swap_math_error)?;
+
+        require!(
+            quote.amount_out >= args.minimum_amount_out,
+            MetaAmmError::SlippageExceeded
+        );
+
+        let pool_config_key = ctx.accounts.pool_config.key();
+        let vault_authority_bump = [ctx.accounts.vault_state.vault_authority_bump];
+        let vault_authority_seeds: &[&[u8]] = &[
+            VAULT_AUTHORITY_SEED,
+            pool_config_key.as_ref(),
+            &vault_authority_bump,
+        ];
+        let signer_seeds = &[vault_authority_seeds];
+
+        if args.base_to_quote {
+            transfer_checked(
+                CpiContext::new(
+                    ctx.accounts.base_token_program.to_account_info(),
+                    TransferChecked {
+                        from: ctx.accounts.user_base_account.to_account_info(),
+                        mint: ctx.accounts.base_mint.to_account_info(),
+                        to: ctx.accounts.base_vault.to_account_info(),
+                        authority: ctx.accounts.taker.to_account_info(),
+                    },
+                ),
+                args.amount_in,
+                ctx.accounts.base_mint.decimals,
+            )?;
+            transfer_checked(
+                CpiContext::new_with_signer(
+                    ctx.accounts.quote_token_program.to_account_info(),
+                    TransferChecked {
+                        from: ctx.accounts.quote_vault.to_account_info(),
+                        mint: ctx.accounts.quote_mint.to_account_info(),
+                        to: ctx.accounts.user_quote_account.to_account_info(),
+                        authority: ctx.accounts.vault_authority.to_account_info(),
+                    },
+                    signer_seeds,
+                ),
+                quote.amount_out,
+                ctx.accounts.quote_mint.decimals,
+            )?;
+        } else {
+            transfer_checked(
+                CpiContext::new(
+                    ctx.accounts.quote_token_program.to_account_info(),
+                    TransferChecked {
+                        from: ctx.accounts.user_quote_account.to_account_info(),
+                        mint: ctx.accounts.quote_mint.to_account_info(),
+                        to: ctx.accounts.quote_vault.to_account_info(),
+                        authority: ctx.accounts.taker.to_account_info(),
+                    },
+                ),
+                args.amount_in,
+                ctx.accounts.quote_mint.decimals,
+            )?;
+            transfer_checked(
+                CpiContext::new_with_signer(
+                    ctx.accounts.base_token_program.to_account_info(),
+                    TransferChecked {
+                        from: ctx.accounts.base_vault.to_account_info(),
+                        mint: ctx.accounts.base_mint.to_account_info(),
+                        to: ctx.accounts.user_base_account.to_account_info(),
+                        authority: ctx.accounts.vault_authority.to_account_info(),
+                    },
+                    signer_seeds,
+                ),
+                quote.amount_out,
+                ctx.accounts.base_mint.decimals,
             )?;
         }
 
@@ -362,6 +488,7 @@ pub struct FundPool<'info> {
     )]
     pub vault_authority: UncheckedAccount<'info>,
     #[account(
+        mut,
         seeds = [
             VAULT_STATE_SEED,
             pool_config.key().as_ref(),
@@ -423,6 +550,99 @@ pub struct FundPool<'info> {
     pub quote_vault: Box<InterfaceAccount<'info, TokenAccount>>,
 }
 
+#[derive(Accounts)]
+pub struct SwapExactIn<'info> {
+    pub taker: Signer<'info>,
+    #[account(
+        seeds = [
+            POOL_CONFIG_SEED,
+            pool_config.authority.as_ref(),
+            pool_config.base_mint.as_ref(),
+            pool_config.quote_mint.as_ref(),
+        ],
+        bump = pool_config.bump
+    )]
+    pub pool_config: Box<Account<'info, ReferenceQuotePoolConfig>>,
+    #[account(
+        seeds = [
+            QUOTE_STATE_SEED,
+            pool_config.key().as_ref(),
+        ],
+        bump = quote_state.bump,
+        constraint = quote_state.pool_config == pool_config.key() @ MetaAmmError::QuoteStatePoolMismatch
+    )]
+    pub quote_state: Box<Account<'info, ReferenceQuoteState>>,
+    /// CHECK: PDA authority only; token accounts below verify it owns both vaults.
+    #[account(
+        seeds = [
+            VAULT_AUTHORITY_SEED,
+            pool_config.key().as_ref(),
+        ],
+        bump = vault_state.vault_authority_bump
+    )]
+    pub vault_authority: UncheckedAccount<'info>,
+    #[account(
+        seeds = [
+            VAULT_STATE_SEED,
+            pool_config.key().as_ref(),
+        ],
+        bump = vault_state.bump,
+        constraint = vault_state.pool_config == pool_config.key() @ MetaAmmError::VaultStatePoolMismatch,
+        constraint = vault_state.maker_authority == pool_config.authority @ MetaAmmError::VaultStateAuthorityMismatch,
+        constraint = vault_state.custody_model == CUSTODY_MODEL_MAKER_OWNED @ MetaAmmError::UnsupportedCustodyModel,
+        constraint = !vault_state.paused @ MetaAmmError::VaultPaused
+    )]
+    pub vault_state: Box<Account<'info, VaultState>>,
+    #[account(
+        mint::token_program = base_token_program,
+        constraint = base_mint.key() == pool_config.base_mint @ MetaAmmError::VaultMintMismatch
+    )]
+    pub base_mint: Box<InterfaceAccount<'info, Mint>>,
+    #[account(
+        mint::token_program = quote_token_program,
+        constraint = quote_mint.key() == pool_config.quote_mint @ MetaAmmError::VaultMintMismatch
+    )]
+    pub quote_mint: Box<InterfaceAccount<'info, Mint>>,
+    #[account(
+        constraint = base_token_program.key() == pool_config.base_token_program @ MetaAmmError::VaultTokenProgramMismatch
+    )]
+    pub base_token_program: Interface<'info, TokenInterface>,
+    #[account(
+        constraint = quote_token_program.key() == pool_config.quote_token_program @ MetaAmmError::VaultTokenProgramMismatch
+    )]
+    pub quote_token_program: Interface<'info, TokenInterface>,
+    #[account(
+        mut,
+        token::mint = base_mint,
+        token::authority = taker,
+        token::token_program = base_token_program
+    )]
+    pub user_base_account: Box<InterfaceAccount<'info, TokenAccount>>,
+    #[account(
+        mut,
+        token::mint = quote_mint,
+        token::authority = taker,
+        token::token_program = quote_token_program
+    )]
+    pub user_quote_account: Box<InterfaceAccount<'info, TokenAccount>>,
+    #[account(
+        mut,
+        token::mint = base_mint,
+        token::authority = vault_authority,
+        token::token_program = base_token_program,
+        constraint = base_vault.key() == vault_state.base_vault @ MetaAmmError::VaultAccountMismatch
+    )]
+    pub base_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+    #[account(
+        mut,
+        token::mint = quote_mint,
+        token::authority = vault_authority,
+        token::token_program = quote_token_program,
+        constraint = quote_vault.key() == vault_state.quote_vault @ MetaAmmError::VaultAccountMismatch
+    )]
+    pub quote_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+}
+
 #[account]
 #[derive(InitSpace)]
 pub struct ReferenceQuotePoolConfig {
@@ -443,6 +663,10 @@ impl ReferenceQuotePoolConfig {
             1 => Ok(1),
             _ => err!(MetaAmmError::InvalidSameSlotUpdateOrder),
         }
+    }
+
+    fn reference_quote_params(&self) -> ReferenceQuoteParams {
+        reference_quote_params_from_pool_config_bytes(&self.layout)
     }
 }
 
@@ -497,6 +721,41 @@ impl ReferenceQuoteState {
 
         Ok(())
     }
+
+    fn assert_usable_for_swap(
+        &self,
+        pool_config: Pubkey,
+        expected_same_slot_order: u8,
+        expected_sequence: u64,
+        current_slot: u64,
+    ) -> Result<()> {
+        require_eq!(
+            self.pool_config,
+            pool_config,
+            MetaAmmError::QuoteStatePoolMismatch
+        );
+        require!(!self.paused, MetaAmmError::QuoteStatePaused);
+        require_eq!(
+            self.same_slot_order,
+            expected_same_slot_order,
+            MetaAmmError::QuoteStateOrderMismatch
+        );
+        require!(
+            self.mid_price_q64x64 > 0 && self.sequence > 0,
+            MetaAmmError::QuoteNotInitialized
+        );
+        require_eq!(
+            self.sequence,
+            expected_sequence,
+            MetaAmmError::QuoteSequenceMismatch
+        );
+        require!(
+            self.publish_slot <= current_slot,
+            MetaAmmError::FutureQuotePublishSlot
+        );
+
+        Ok(())
+    }
 }
 
 #[account]
@@ -513,7 +772,8 @@ pub struct VaultState {
     pub custody_model: u8,
     pub paused: bool,
     pub _padding: [u8; 4],
-    pub reserved: [u8; 40],
+    pub target_base_inventory: u64,
+    pub reserved: [u8; 32],
 }
 
 impl VaultState {
@@ -550,6 +810,28 @@ impl VaultState {
             MetaAmmError::UnsupportedCustodyModel
         );
         require!(!self.paused, MetaAmmError::VaultPaused);
+
+        Ok(())
+    }
+
+    fn apply_base_funding_to_target(
+        &mut self,
+        pre_base_vault_amount: u64,
+        base_amount: u64,
+    ) -> Result<()> {
+        if base_amount == 0 {
+            return Ok(());
+        }
+        if self.target_base_inventory == 0 {
+            self.target_base_inventory = pre_base_vault_amount
+                .checked_add(base_amount)
+                .ok_or(MetaAmmError::VaultInventoryOverflow)?;
+        } else {
+            self.target_base_inventory = self
+                .target_base_inventory
+                .checked_add(base_amount)
+                .ok_or(MetaAmmError::VaultInventoryOverflow)?;
+        }
 
         Ok(())
     }
@@ -673,6 +955,46 @@ impl FundPoolArgs {
     }
 }
 
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SwapExactInArgs {
+    pub amount_in: u64,
+    pub minimum_amount_out: u64,
+    pub expected_quote_sequence: u64,
+    pub base_to_quote: bool,
+}
+
+impl SwapExactInArgs {
+    fn validate(self) -> Result<()> {
+        require!(self.amount_in > 0, MetaAmmError::InvalidSwapAmount);
+        require!(
+            self.minimum_amount_out > 0,
+            MetaAmmError::InvalidMinimumAmountOut
+        );
+        require!(
+            self.expected_quote_sequence > 0,
+            MetaAmmError::QuoteNotInitialized
+        );
+        Ok(())
+    }
+}
+
+fn map_swap_math_error(error: MathError) -> anchor_lang::error::Error {
+    match error {
+        MathError::InvalidAmount => error!(MetaAmmError::InvalidSwapAmount),
+        MathError::EmptyLiquidity => error!(MetaAmmError::EmptyLiquidity),
+        MathError::PoolPaused => error!(MetaAmmError::PoolConfigPaused),
+        MathError::StaleQuote => error!(MetaAmmError::StaleReferenceQuote),
+        MathError::QuoteProtected => error!(MetaAmmError::ProtectedQuoteTradeLimit),
+        MathError::InventoryBand => error!(MetaAmmError::InventoryBandExceeded),
+        MathError::InvalidConfig => error!(MetaAmmError::InvalidReferenceQuoteConfig),
+        MathError::InvalidFee
+        | MathError::Overflow
+        | MathError::Underflow
+        | MathError::DivByZero
+        | MathError::DecimalsOutOfRange => error!(MetaAmmError::SwapMathFailed),
+    }
+}
+
 #[error_code]
 pub enum MetaAmmError {
     #[msg("ReferenceQuote config failed bounded compiler validation")]
@@ -713,6 +1035,34 @@ pub enum MetaAmmError {
     VaultPaused,
     #[msg("funding amount must include at least one positive side")]
     EmptyFundingAmount,
+    #[msg("pool config is paused")]
+    PoolConfigPaused,
+    #[msg("quote state is paused")]
+    QuoteStatePaused,
+    #[msg("quote state is not initialized")]
+    QuoteNotInitialized,
+    #[msg("quote sequence does not match the swap request")]
+    QuoteSequenceMismatch,
+    #[msg("swap amount must be positive")]
+    InvalidSwapAmount,
+    #[msg("pool has empty liquidity")]
+    EmptyLiquidity,
+    #[msg("minimum amount out must be positive")]
+    InvalidMinimumAmountOut,
+    #[msg("swap output is below minimum amount out")]
+    SlippageExceeded,
+    #[msg("vault inventory target is not initialized")]
+    UninitializedInventoryTarget,
+    #[msg("vault inventory overflow")]
+    VaultInventoryOverflow,
+    #[msg("reference quote is stale")]
+    StaleReferenceQuote,
+    #[msg("trade exceeds protected quote size")]
+    ProtectedQuoteTradeLimit,
+    #[msg("inventory band exceeded")]
+    InventoryBandExceeded,
+    #[msg("swap math failed")]
+    SwapMathFailed,
 }
 
 #[cfg(test)]
@@ -821,7 +1171,8 @@ mod tests {
             custody_model: CUSTODY_MODEL_MAKER_OWNED,
             paused: false,
             _padding: [0; 4],
-            reserved: [0; 40],
+            target_base_inventory: 0,
+            reserved: [0; 32],
         }
     }
 
@@ -872,7 +1223,7 @@ mod tests {
     fn vault_state_account_space_is_stable() {
         assert_eq!(
             VaultState::INIT_SPACE,
-            32 + 32 + 32 + 32 + 32 + 32 + 1 + 1 + 1 + 1 + 4 + 40
+            32 + 32 + 32 + 32 + 32 + 32 + 1 + 1 + 1 + 1 + 4 + 8 + 32
         );
     }
 
@@ -900,7 +1251,8 @@ mod tests {
 
         assert_eq!(state.custody_model, CUSTODY_MODEL_MAKER_OWNED);
         assert!(!state.paused);
-        assert_eq!(state.reserved, [0; 40]);
+        assert_eq!(state.target_base_inventory, 0);
+        assert_eq!(state.reserved, [0; 32]);
     }
 
     #[test]
@@ -965,6 +1317,79 @@ mod tests {
         assert!(state
             .assert_maker_owned_for_pool(pool, maker, base_vault, quote_vault)
             .is_err());
+    }
+
+    #[test]
+    fn vault_state_tracks_base_funding_target() {
+        let mut state = vault_state(key(1), key(2), key(3), key(4));
+
+        state.apply_base_funding_to_target(0, 0).unwrap();
+        assert_eq!(state.target_base_inventory, 0);
+
+        state.apply_base_funding_to_target(10, 90).unwrap();
+        assert_eq!(state.target_base_inventory, 100);
+
+        state.apply_base_funding_to_target(100, 25).unwrap();
+        assert_eq!(state.target_base_inventory, 125);
+
+        state.target_base_inventory = u64::MAX;
+        assert!(state.apply_base_funding_to_target(0, 1).is_err());
+    }
+
+    #[test]
+    fn swap_args_require_amount_slippage_and_quote_binding() {
+        assert!(SwapExactInArgs {
+            amount_in: 0,
+            minimum_amount_out: 1,
+            expected_quote_sequence: 1,
+            base_to_quote: true
+        }
+        .validate()
+        .is_err());
+        assert!(SwapExactInArgs {
+            amount_in: 1,
+            minimum_amount_out: 0,
+            expected_quote_sequence: 1,
+            base_to_quote: true
+        }
+        .validate()
+        .is_err());
+        assert!(SwapExactInArgs {
+            amount_in: 1,
+            minimum_amount_out: 1,
+            expected_quote_sequence: 0,
+            base_to_quote: true
+        }
+        .validate()
+        .is_err());
+        assert!(SwapExactInArgs {
+            amount_in: 1,
+            minimum_amount_out: 1,
+            expected_quote_sequence: 1,
+            base_to_quote: false
+        }
+        .validate()
+        .is_ok());
+    }
+
+    #[test]
+    fn quote_state_validates_swap_sequence_binding() {
+        let pool = key(1);
+        let quote_authority = key(2);
+        let mut state = quote_state(pool, quote_authority);
+
+        assert!(state.assert_usable_for_swap(pool, 1, 1, 10).is_err());
+
+        state.mid_price_q64x64 = 1u128 << 64;
+        state.publish_slot = 8;
+        state.sequence = 2;
+        assert!(state.assert_usable_for_swap(pool, 1, 2, 10).is_ok());
+        assert!(state.assert_usable_for_swap(pool, 1, 1, 10).is_err());
+        assert!(state.assert_usable_for_swap(pool, 0, 2, 10).is_err());
+        assert!(state.assert_usable_for_swap(pool, 1, 2, 7).is_err());
+
+        state.paused = true;
+        assert!(state.assert_usable_for_swap(pool, 1, 2, 10).is_err());
     }
 
     #[test]

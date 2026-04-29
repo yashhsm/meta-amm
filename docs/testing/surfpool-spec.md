@@ -9,9 +9,10 @@ today:
 - `update_reference_quote`
 - `initialize_maker_vaults`
 - `fund_pool`
+- `swap_exact_in`
 
-`swap_exact_in` does not exist yet, so the suite does not claim swap safety,
-price improvement, or maker edge.
+The suite validates instruction/account behavior and token conservation. It
+does not claim price improvement or maker edge.
 
 ## Fork Source
 
@@ -40,6 +41,11 @@ control of the real USDC mint authority.
 8. Funding must reject zero-sided no-ops.
 9. Funding must move exactly the requested token amount from source to vault.
 10. Token-program mismatches must fail before any vault state is accepted.
+11. Swaps must bind to the quote sequence the taker simulated.
+12. Swaps must enforce minimum output before moving tokens.
+13. Expired ReferenceQuote state must reject swaps.
+14. Vault and user token balances must conserve exactly across both swap
+    directions.
 
 ## Cases
 
@@ -52,8 +58,8 @@ initialize a pool, quote state, maker vaults, and a one-sided wSOL funding flow.
 ### Local SPL Pair
 
 Create a local 9-decimal base mint and a local 6-decimal quote mint. Exercise
-the full happy path including two-sided funding. Verify exact source and vault
-balance deltas.
+the full happy path including two-sided funding and both swap directions. Verify
+exact source, destination, and vault balance deltas.
 
 ### Quote Adversarial Cases
 
@@ -63,6 +69,7 @@ After one valid quote update:
 - publish an older slot with a higher sequence and expect rejection;
 - publish a future slot and expect rejection;
 - submit an update from an unauthorized signer and expect rejection.
+- bind a swap to an old quote sequence after a refresh and expect rejection.
 
 ### Custody Adversarial Cases
 
@@ -71,6 +78,8 @@ After vault initialization:
 - call `fund_pool` with both amounts set to zero and expect rejection;
 - pass the wrong token program for an already configured mint and expect
   account validation failure.
+- request an impossible `minimum_amount_out` and expect rejection before token
+  movement.
 
 ### Token-2022 Compatibility
 
