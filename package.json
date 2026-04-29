@@ -1,0 +1,18 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck:surfpool": "tsc --noEmit --skipLibCheck --target ES2022 --module NodeNext --moduleResolution NodeNext tests/surfpool/meta_amm_surfpool.ts",
+    "test:surfpool": "tsx tests/surfpool/meta_amm_surfpool.ts",
+    "surfpool:smoke": "bash scripts/surfpool_smoke.sh"
+  },
+  "devDependencies": {
+    "@coral-xyz/anchor": "0.32.1",
+    "@solana/spl-token": "^0.4.14",
+    "@solana/web3.js": "^1.98.4",
+    "@types/bn.js": "^5.2.0",
+    "@types/node": "^25.6.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3"
+  }
+}

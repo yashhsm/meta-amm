@@ -24,6 +24,7 @@ The project direction is:
 - [Selected architecture](docs/architecture/architecture.md)
 - [Implementation-slice review](docs/architecture/implementation-slice-review.md)
 - [MVP roadmap](docs/roadmap/mvp-roadmap.md)
+- [Surfpool test specification](docs/testing/surfpool-spec.md)
 - Anchor program slices for initializing ReferenceQuote pool config, quote
   state, and maker-owned vault PDAs
 
@@ -92,6 +93,9 @@ cargo run -p meta_amm_sim --quiet -- --scenario-pack
 cargo run -p meta_amm_sim --quiet -- --calibrate-reference
 cargo run -p meta_amm_sim --quiet -- --calibrate-reference --export-best-config
 cargo run -p meta_amm_sim --quiet -- --replay-csv tests/fixtures/reference-replay.csv
+pnpm install --frozen-lockfile
+pnpm typecheck:surfpool
+pnpm surfpool:smoke
 ```
 
 The current Anchor program exposes `initialize_reference_quote_pool`,
