@@ -43,6 +43,22 @@ const _: () = assert!(
 );
 pub const REFERENCE_QUOTE_SWAP_ACCOUNT_META_HEADROOM: u8 =
     REFERENCE_QUOTE_DEFAULT_SWAP_ACCOUNT_META_BUDGET - REFERENCE_QUOTE_REQUIRED_SWAP_ACCOUNT_METAS;
+pub const REFERENCE_QUOTE_SWAP_ACCOUNT_LABELS: [&str;
+    REFERENCE_QUOTE_REQUIRED_SWAP_ACCOUNT_METAS as usize] = [
+    "taker",
+    "pool_config",
+    "quote_state",
+    "vault_authority",
+    "vault_state",
+    "base_mint",
+    "quote_mint",
+    "base_token_program",
+    "quote_token_program",
+    "user_base_account",
+    "user_quote_account",
+    "base_vault",
+    "quote_vault",
+];
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +104,35 @@ impl AccountBudget {
             required_swap_account_metas: REFERENCE_QUOTE_REQUIRED_SWAP_ACCOUNT_METAS,
             max_swap_account_metas: REFERENCE_QUOTE_DEFAULT_SWAP_ACCOUNT_META_BUDGET,
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AggregatorCompatibilityManifest {
+    pub mode_id: u8,
+    pub supports_exact_in: bool,
+    pub supports_exact_out: bool,
+    pub required_swap_account_metas: u8,
+    pub max_swap_account_metas: u8,
+    pub account_labels: [&'static str; REFERENCE_QUOTE_REQUIRED_SWAP_ACCOUNT_METAS as usize],
+    pub supports_spl_token: bool,
+    pub supports_token_2022: bool,
+    pub supports_transfer_fee_mints: bool,
+}
+
+pub const fn reference_quote_aggregator_manifest(
+    account_budget: AccountBudget,
+) -> AggregatorCompatibilityManifest {
+    AggregatorCompatibilityManifest {
+        mode_id: REFERENCE_QUOTE_MODE_ID,
+        supports_exact_in: true,
+        supports_exact_out: false,
+        required_swap_account_metas: account_budget.required_swap_account_metas,
+        max_swap_account_metas: account_budget.max_swap_account_metas,
+        account_labels: REFERENCE_QUOTE_SWAP_ACCOUNT_LABELS,
+        supports_spl_token: true,
+        supports_token_2022: true,
+        supports_transfer_fee_mints: false,
     }
 }
 
@@ -892,6 +937,25 @@ mod tests {
             compiled.account_budget.max_swap_account_metas,
             REFERENCE_QUOTE_DEFAULT_SWAP_ACCOUNT_META_BUDGET
         );
+    }
+
+    #[test]
+    fn aggregator_manifest_names_the_swap_account_contract() {
+        let manifest =
+            reference_quote_aggregator_manifest(AccountBudget::reference_quote_jupiter_default());
+
+        assert_eq!(manifest.mode_id, REFERENCE_QUOTE_MODE_ID);
+        assert!(manifest.supports_exact_in);
+        assert!(!manifest.supports_exact_out);
+        assert!(manifest.supports_spl_token);
+        assert!(manifest.supports_token_2022);
+        assert!(!manifest.supports_transfer_fee_mints);
+        assert_eq!(
+            manifest.required_swap_account_metas,
+            REFERENCE_QUOTE_REQUIRED_SWAP_ACCOUNT_METAS
+        );
+        assert_eq!(manifest.account_labels[0], "taker");
+        assert_eq!(manifest.account_labels[12], "quote_vault");
     }
 
     #[test]

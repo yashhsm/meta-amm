@@ -7,7 +7,11 @@ today:
 - `initialize_reference_quote_pool`
 - `initialize_reference_quote_state`
 - `update_reference_quote`
+- `update_reference_quote_v2`
 - `pause_pool`
+- `initialize_curve_slot_state`
+- `stage_curve_slot`
+- `activate_curve_slot`
 - `initialize_maker_vaults`
 - `fund_pool`
 - `swap_exact_in`
@@ -51,6 +55,9 @@ control of the real USDC mint authority.
     tokens.
 16. Token-2022 transfer-fee mints must be rejected until swap quotes can
     enforce `minimum_amount_out` on net received tokens.
+17. Curve-slot staging and activation must be authority-gated and monotonic.
+18. Combined quote updates must move quote sequence and dynamic base spread
+    under the same quote signer rules.
 
 ## Cases
 
@@ -63,8 +70,9 @@ initialize a pool, quote state, maker vaults, and a one-sided wSOL funding flow.
 ### Local SPL Pair
 
 Create a local 9-decimal base mint and a local 6-decimal quote mint. Exercise
-the full happy path including two-sided funding and both swap directions. Verify
-exact source, destination, and vault balance deltas.
+the full happy path including curve-slot staging, two-sided funding, both swap
+directions, and a combined quote update. Verify exact source, destination, and
+vault balance deltas.
 
 ### Quote Adversarial Cases
 
@@ -76,6 +84,14 @@ After one valid quote update:
 - submit an update from an unauthorized signer and expect rejection.
 - bind a swap to an old quote sequence after a refresh and expect rejection.
 - submit a pool pause from an unauthorized signer and expect rejection.
+- update price and base spread together through `update_reference_quote_v2` and
+  verify the quote-state sequence advances.
+
+### Curve Slot Cases
+
+Initialize the curve-slot state, stage a non-zero curve hash, activate the same
+slot and hash with a higher sequence, and verify the pending hash clears after
+activation.
 
 ### Custody Adversarial Cases
 

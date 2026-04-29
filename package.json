@@ -2,7 +2,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "typecheck:surfpool": "tsc --noEmit --skipLibCheck --target ES2022 --module NodeNext --moduleResolution NodeNext tests/surfpool/meta_amm_surfpool.ts",
+    "typecheck:sdk": "tsc --noEmit --skipLibCheck --types node --target ES2022 --module NodeNext --moduleResolution NodeNext sdk/ts/src/index.ts sdk/ts/src/index.test.ts",
+    "test:sdk": "tsx sdk/ts/src/index.test.ts",
+    "typecheck:surfpool": "tsc --noEmit --skipLibCheck --types node --target ES2022 --module NodeNext --moduleResolution NodeNext tests/surfpool/meta_amm_surfpool.ts",
     "test:surfpool": "tsx tests/surfpool/meta_amm_surfpool.ts",
     "surfpool:smoke": "bash scripts/surfpool_smoke.sh"
   },

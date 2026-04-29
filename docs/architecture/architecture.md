@@ -88,6 +88,29 @@ The first working slice changed several architectural assumptions:
   but the pooled LP path needs share algebra and withdrawal queues before the
   state layout is considered final.
 
+## Current Build Snapshot
+
+The live repo now implements a maker-owned ReferenceQuote path with:
+
+- deterministic pool config, quote state, maker vault state, and token vault
+  PDAs
+- exact-in swaps bound to an expected quote sequence and minimum output
+- Token-2022 support for exact-transfer mints, with transfer-fee mints rejected
+- authority pause for swaps
+- quote-age behavior spanning fresh, aging, protected, expired, and paused
+  states
+- swap analytics emitted as `ReferenceSwapEvent`
+- `update_reference_quote_v2` for atomic midprice plus base-spread updates
+- `CurveSlotState` for staged and monotonic curve activation
+- config and TypeScript SDK aggregator manifests for the ReferenceQuote swap
+  account contract
+- TypeScript cached-state quoting parity tests for the ReferenceQuote path
+- bounded Piecewise/Prop curve math and simulator post-fill policies
+
+The staged curve state is intentionally not wired into `swap_exact_in` yet. It
+is an activation boundary for future `BinnedRange` and `PiecewiseCurve` modes,
+not an interpreted curve runtime.
+
 ## System Diagram
 
 ```mermaid

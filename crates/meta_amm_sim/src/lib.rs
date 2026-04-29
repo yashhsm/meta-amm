@@ -1,6 +1,7 @@
 use meta_amm_math::{
-    cpmm_quote_exact_in, reference_quote_exact_in, CpmmReserves, MathError, Q64x64, QuoteAgeState,
-    ReferenceQuoteParams, ReferenceQuoteState,
+    apply_post_fill_to_side, buy_base_with_quote, cpmm_quote_exact_in, reference_quote_exact_in,
+    sell_base_for_quote, CpmmReserves, MathError, PiecewiseBookSide, PostFillPolicy, Q64x64,
+    QuoteAgeState, ReferenceQuoteParams, ReferenceQuoteState,
 };
 
 pub use meta_amm_config::{QuoteUpdateEnvelope, ReferenceQuoteStrategyConfig, SameSlotUpdateOrder};
@@ -138,6 +139,36 @@ pub struct GeneratedReferenceQuoteScenario {
     pub drift_bps_per_slot: i16,
     pub trade_probability_bps: u16,
     pub max_trade_base_atoms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PiecewisePropScenario {
+    pub assumptions: ScenarioAssumptions,
+    pub bid_side: PiecewiseBookSide,
+    pub ask_side: PiecewiseBookSide,
+    pub post_fill_policy: PostFillPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PiecewisePropReport {
+    pub assumptions: ScenarioAssumptions,
+    pub trades_attempted: u64,
+    pub trades_filled: u64,
+    pub trades_rejected: u64,
+    pub post_fills_applied: u64,
+    pub taker_edge_quote_atoms: i128,
+    pub max_segments_crossed: u8,
+    pub final_bid_side: PiecewiseBookSide,
+    pub final_ask_side: PiecewiseBookSide,
+}
+
+impl PiecewisePropReport {
+    pub fn fill_rate_bps(&self) -> u16 {
+        if self.trades_attempted == 0 {
+            return 0;
+        }
+        ((self.trades_filled * 10_000) / self.trades_attempted) as u16
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -445,6 +476,75 @@ pub fn simulate_reference_quote(
         })
         .collect();
     simulate_reference_quote_market_path(scenario, &slots)
+}
+
+pub fn simulate_piecewise_prop(
+    scenario: PiecewisePropScenario,
+    events: &[FlowEvent],
+) -> Result<PiecewisePropReport, MathError> {
+    scenario.bid_side.validate()?;
+    scenario.ask_side.validate()?;
+
+    let mut bid_side = scenario.bid_side;
+    let mut ask_side = scenario.ask_side;
+    let mut report = PiecewisePropReport {
+        assumptions: scenario.assumptions,
+        trades_attempted: events.len() as u64,
+        trades_filled: 0,
+        trades_rejected: 0,
+        post_fills_applied: 0,
+        taker_edge_quote_atoms: 0,
+        max_segments_crossed: 0,
+        final_bid_side: bid_side,
+        final_ask_side: ask_side,
+    };
+
+    for event in events {
+        match event.side {
+            Side::BaseToQuote => match sell_base_for_quote(&mut bid_side, event.amount_in) {
+                Ok(quote) => {
+                    report.trades_filled += 1;
+                    report.max_segments_crossed =
+                        report.max_segments_crossed.max(quote.segments_crossed);
+                    report.taker_edge_quote_atoms = report
+                        .taker_edge_quote_atoms
+                        .saturating_add(taker_edge_quote_atoms(event, quote.amount_out)?);
+                    apply_post_fill_to_side(
+                        &mut ask_side,
+                        event.amount_in,
+                        scenario.post_fill_policy,
+                        quote.segments_crossed,
+                    )?;
+                    report.post_fills_applied += 1;
+                }
+                Err(MathError::InvalidAmount) => report.trades_rejected += 1,
+                Err(error) => return Err(error),
+            },
+            Side::QuoteToBase => match buy_base_with_quote(&mut ask_side, event.amount_in) {
+                Ok(quote) => {
+                    report.trades_filled += 1;
+                    report.max_segments_crossed =
+                        report.max_segments_crossed.max(quote.segments_crossed);
+                    report.taker_edge_quote_atoms = report
+                        .taker_edge_quote_atoms
+                        .saturating_add(taker_edge_quote_atoms(event, quote.amount_out)?);
+                    apply_post_fill_to_side(
+                        &mut bid_side,
+                        quote.amount_out,
+                        scenario.post_fill_policy,
+                        quote.segments_crossed,
+                    )?;
+                    report.post_fills_applied += 1;
+                }
+                Err(MathError::InvalidAmount) => report.trades_rejected += 1,
+                Err(error) => return Err(error),
+            },
+        }
+    }
+
+    report.final_bid_side = bid_side;
+    report.final_ask_side = ask_side;
+    Ok(report)
 }
 
 pub fn simulate_reference_quote_market_path(
@@ -1853,6 +1953,59 @@ mod tests {
         );
     }
 
+    #[test]
+    fn piecewise_prop_simulates_post_fill_replenishment() {
+        let side = piecewise_side();
+        let report = simulate_piecewise_prop(
+            PiecewisePropScenario {
+                assumptions: assumptions(1),
+                bid_side: side,
+                ask_side: side,
+                post_fill_policy: PostFillPolicy::HealThenAdd,
+            },
+            &[FlowEvent {
+                slot: 1,
+                side: Side::QuoteToBase,
+                amount_in: 9_850,
+                fair_price: Q64x64::from_int(100),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(report.trades_attempted, 1);
+        assert_eq!(report.trades_filled, 1);
+        assert_eq!(report.fill_rate_bps(), 10_000);
+        assert_eq!(report.post_fills_applied, 1);
+        assert_eq!(report.final_ask_side.consumed_quantity, 100);
+        assert_eq!(report.final_bid_side.total_quantity, 700);
+        assert!(report.taker_edge_quote_atoms > 0);
+    }
+
+    #[test]
+    fn piecewise_prop_rejects_orders_beyond_bounded_depth() {
+        let side = piecewise_side();
+        let report = simulate_piecewise_prop(
+            PiecewisePropScenario {
+                assumptions: assumptions(1),
+                bid_side: side,
+                ask_side: side,
+                post_fill_policy: PostFillPolicy::None,
+            },
+            &[FlowEvent {
+                slot: 1,
+                side: Side::QuoteToBase,
+                amount_in: 1_000_000,
+                fair_price: Q64x64::from_int(100),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(report.trades_attempted, 1);
+        assert_eq!(report.trades_filled, 0);
+        assert_eq!(report.trades_rejected, 1);
+        assert_eq!(report.fill_rate_bps(), 0);
+    }
+
     fn reference_params() -> ReferenceQuoteParams {
         ReferenceQuoteParams {
             fee_bps: 30,
@@ -1868,5 +2021,21 @@ mod tests {
             max_inventory_skew_bps: 500,
             hard_inventory_band_bps: 3_000,
         }
+    }
+
+    fn piecewise_side() -> PiecewiseBookSide {
+        PiecewiseBookSide::new(
+            [
+                Q64x64::from_int(98),
+                Q64x64::from_int(99),
+                Q64x64::from_int(100),
+                Q64x64::from_int(101),
+                Q64x64::from_int(102),
+                Q64x64::from_int(103),
+                Q64x64::from_int(104),
+            ],
+            600,
+        )
+        .unwrap()
     }
 }

@@ -15,7 +15,7 @@ use meta_amm_config::{
     REFERENCE_QUOTE_POOL_CONFIG_SAME_SLOT_ORDER_OFFSET,
 };
 use meta_amm_math::{
-    reference_quote_exact_in, MathError, Q64x64, ReferenceQuoteParams,
+    reference_quote_exact_in, MathError, Q64x64, QuoteAgeState, ReferenceQuoteParams,
     ReferenceQuoteState as MathReferenceQuoteState,
 };
 
@@ -27,7 +27,9 @@ pub const VAULT_STATE_SEED: &[u8] = b"vault-state";
 pub const VAULT_AUTHORITY_SEED: &[u8] = b"vault-authority";
 pub const BASE_VAULT_SEED: &[u8] = b"base-vault";
 pub const QUOTE_VAULT_SEED: &[u8] = b"quote-vault";
+pub const CURVE_SLOT_STATE_SEED: &[u8] = b"curve-slot-state";
 pub const CUSTODY_MODEL_MAKER_OWNED: u8 = 0;
+pub const MAX_CURVE_SLOTS: u8 = 16;
 
 #[program]
 pub mod meta_amm {
@@ -88,6 +90,12 @@ pub mod meta_amm {
         quote_state.paused = false;
         quote_state.same_slot_order = same_slot_order;
         quote_state._padding = [0; 5];
+        quote_state.set_base_half_spread_bps(
+            ctx.accounts
+                .pool_config
+                .reference_quote_params()
+                .base_half_spread_bps,
+        );
         quote_state.mid_price_q64x64 = 0;
         quote_state.publish_slot = 0;
         quote_state.sequence = 0;
@@ -115,9 +123,67 @@ pub mod meta_amm {
         )
     }
 
+    pub fn update_reference_quote_v2(
+        ctx: Context<UpdateReferenceQuote>,
+        args: UpdateReferenceQuoteV2Args,
+    ) -> Result<()> {
+        require_eq!(
+            ctx.accounts.quote_state.same_slot_order,
+            ctx.accounts.pool_config.reference_quote_same_slot_order()?,
+            MetaAmmError::QuoteStateOrderMismatch
+        );
+
+        validate_reference_quote_base_spread(
+            args.base_half_spread_bps,
+            ctx.accounts.pool_config.reference_quote_params(),
+        )?;
+
+        let current_slot = Clock::get()?.slot;
+        ctx.accounts.quote_state.apply_update(
+            ctx.accounts.pool_config.authority,
+            ctx.accounts.quote_signer.key(),
+            args.to_legacy_args(),
+            current_slot,
+        )?;
+        ctx.accounts
+            .quote_state
+            .set_base_half_spread_bps(args.base_half_spread_bps);
+
+        Ok(())
+    }
+
     pub fn pause_pool(ctx: Context<PausePool>, args: PausePoolArgs) -> Result<()> {
         ctx.accounts.pool_config.paused = args.paused;
         Ok(())
+    }
+
+    pub fn initialize_curve_slot_state(ctx: Context<InitializeCurveSlotState>) -> Result<()> {
+        let curve_slot_state = &mut ctx.accounts.curve_slot_state;
+        curve_slot_state.pool_config = ctx.accounts.pool_config.key();
+        curve_slot_state.authority = ctx.accounts.pool_config.authority;
+        curve_slot_state.bump = ctx.bumps.curve_slot_state;
+        curve_slot_state.active_slot = 0;
+        curve_slot_state.pending_slot = 0;
+        curve_slot_state._padding = [0; 5];
+        curve_slot_state.pending_hash = [0; 32];
+        curve_slot_state.sequence = 0;
+        curve_slot_state.reserved = [0; 32];
+
+        Ok(())
+    }
+
+    pub fn stage_curve_slot(
+        ctx: Context<UpdateCurveSlotState>,
+        args: StageCurveSlotArgs,
+    ) -> Result<()> {
+        ctx.accounts.curve_slot_state.stage(args)
+    }
+
+    pub fn activate_curve_slot(
+        ctx: Context<UpdateCurveSlotState>,
+        args: ActivateCurveSlotArgs,
+    ) -> Result<()> {
+        ctx.accounts.curve_slot_state.activate(args)
     }
 
     pub fn initialize_maker_vaults(ctx: Context<InitializeMakerVaults>) -> Result<()> {
@@ -196,11 +262,12 @@ pub mod meta_amm {
         args.validate()?;
         reject_unsupported_token_extensions(&ctx.accounts.base_mint.to_account_info())?;
         reject_unsupported_token_extensions(&ctx.accounts.quote_mint.to_account_info())?;
+        let now_slot = Clock::get()?.slot;
         ctx.accounts.quote_state.assert_usable_for_swap(
             ctx.accounts.pool_config.key(),
             ctx.accounts.pool_config.reference_quote_same_slot_order()?,
             args.expected_quote_sequence,
-            Clock::get()?.slot,
+            now_slot,
         )?;
         ctx.accounts.vault_state.assert_maker_owned_for_pool(
             ctx.accounts.pool_config.key(),
@@ -217,7 +284,11 @@ pub mod meta_amm {
             MetaAmmError::UninitializedInventoryTarget
         );
 
-        let now_slot = Clock::get()?.slot;
+        let mut params = ctx.accounts.pool_config.reference_quote_params();
+        params.base_half_spread_bps = ctx
+            .accounts
+            .quote_state
+            .base_half_spread_bps(params.base_half_spread_bps);
         let quote = reference_quote_exact_in(
             MathReferenceQuoteState {
                 base_inventory: ctx.accounts.base_vault.amount,
@@ -230,7 +301,7 @@ pub mod meta_amm {
                     || ctx.accounts.quote_state.paused
                     || ctx.accounts.vault_state.paused,
             },
-            ctx.accounts.pool_config.reference_quote_params(),
+            params,
             args.amount_in,
             args.base_to_quote,
         )
@@ -307,6 +378,25 @@ pub mod meta_amm {
                 ctx.accounts.base_mint.decimals,
             )?;
         }
+
+        emit!(ReferenceSwapEvent {
+            pool_config: ctx.accounts.pool_config.key(),
+            taker: ctx.accounts.taker.key(),
+            base_to_quote: args.base_to_quote,
+            amount_in: args.amount_in,
+            amount_in_less_fee: quote.amount_in_less_fee,
+            amount_out: quote.amount_out,
+            quote_sequence: ctx.accounts.quote_state.sequence,
+            quote_publish_slot: ctx.accounts.quote_state.publish_slot,
+            quote_age_slots: now_slot.saturating_sub(ctx.accounts.quote_state.publish_slot),
+            age_state: quote_age_state_to_u8(quote.age_state),
+            mid_price_q64x64: ctx.accounts.quote_state.mid_price_q64x64,
+            effective_price_q64x64: quote.effective_price.0,
+            applied_spread_bps: quote.applied_spread_bps,
+            inventory_imbalance_bps: quote.inventory_imbalance_bps,
+            new_base_inventory: quote.new_base_inventory,
+            new_quote_inventory: quote.new_quote_inventory,
+        });
 
         Ok(())
     }
@@ -395,6 +485,67 @@ pub struct UpdateReferenceQuote<'info> {
         constraint = quote_state.pool_config == pool_config.key() @ MetaAmmError::QuoteStatePoolMismatch
     )]
     pub quote_state: Account<'info, ReferenceQuoteState>,
+}
+
+#[derive(Accounts)]
+pub struct InitializeCurveSlotState<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(
+        constraint = pool_config.authority == authority.key() @ MetaAmmError::UnauthorizedPoolAuthority
+    )]
+    pub authority: Signer<'info>,
+    #[account(
+        seeds = [
+            POOL_CONFIG_SEED,
+            pool_config.authority.as_ref(),
+            pool_config.base_mint.as_ref(),
+            pool_config.quote_mint.as_ref(),
+        ],
+        bump = pool_config.bump
+    )]
+    pub pool_config: Box<Account<'info, ReferenceQuotePoolConfig>>,
+    #[account(
+        init,
+        payer = payer,
+        space = 8 + CurveSlotState::INIT_SPACE,
+        seeds = [
+            CURVE_SLOT_STATE_SEED,
+            pool_config.key().as_ref(),
+        ],
+        bump
+    )]
+    pub curve_slot_state: Account<'info, CurveSlotState>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct UpdateCurveSlotState<'info> {
+    #[account(
+        constraint = pool_config.authority == authority.key() @ MetaAmmError::UnauthorizedPoolAuthority
+    )]
+    pub authority: Signer<'info>,
+    #[account(
+        seeds = [
+            POOL_CONFIG_SEED,
+            pool_config.authority.as_ref(),
+            pool_config.base_mint.as_ref(),
+            pool_config.quote_mint.as_ref(),
+        ],
+        bump = pool_config.bump
+    )]
+    pub pool_config: Box<Account<'info, ReferenceQuotePoolConfig>>,
+    #[account(
+        mut,
+        seeds = [
+            CURVE_SLOT_STATE_SEED,
+            pool_config.key().as_ref(),
+        ],
+        bump = curve_slot_state.bump,
+        constraint = curve_slot_state.pool_config == pool_config.key() @ MetaAmmError::CurveSlotPoolMismatch,
+        constraint = curve_slot_state.authority == authority.key() @ MetaAmmError::UnauthorizedPoolAuthority
+    )]
+    pub curve_slot_state: Account<'info, CurveSlotState>,
 }
 
 #[derive(Accounts)]
@@ -723,6 +874,19 @@ pub struct ReferenceQuoteState {
 }
 
 impl ReferenceQuoteState {
+    fn set_base_half_spread_bps(&mut self, base_half_spread_bps: u16) {
+        self._padding[0..2].copy_from_slice(&base_half_spread_bps.to_le_bytes());
+        self._padding[2] = 1;
+    }
+
+    fn base_half_spread_bps(&self, fallback: u16) -> u16 {
+        if self._padding[2] == 1 {
+            u16::from_le_bytes([self._padding[0], self._padding[1]])
+        } else {
+            fallback
+        }
+    }
+
     fn apply_update(
         &mut self,
         pool_authority: Pubkey,
@@ -790,6 +954,55 @@ impl ReferenceQuoteState {
             self.publish_slot <= current_slot,
             MetaAmmError::FutureQuotePublishSlot
         );
+
+        Ok(())
+    }
+}
+
+#[account]
+#[derive(InitSpace)]
+pub struct CurveSlotState {
+    pub pool_config: Pubkey,
+    pub authority: Pubkey,
+    pub bump: u8,
+    pub active_slot: u8,
+    pub pending_slot: u8,
+    pub _padding: [u8; 5],
+    pub pending_hash: [u8; 32],
+    pub sequence: u64,
+    pub reserved: [u8; 32],
+}
+
+impl CurveSlotState {
+    fn stage(&mut self, args: StageCurveSlotArgs) -> Result<()> {
+        validate_curve_slot(args.slot)?;
+        require!(args.curve_hash != [0; 32], MetaAmmError::InvalidCurveHash);
+        require!(
+            args.sequence > self.sequence,
+            MetaAmmError::NonMonotonicCurveSequence
+        );
+
+        self.pending_slot = args.slot;
+        self.pending_hash = args.curve_hash;
+        self.sequence = args.sequence;
+
+        Ok(())
+    }
+
+    fn activate(&mut self, args: ActivateCurveSlotArgs) -> Result<()> {
+        validate_curve_slot(args.slot)?;
+        require!(
+            args.sequence > self.sequence,
+            MetaAmmError::NonMonotonicCurveSequence
+        );
+        require!(
+            self.pending_slot == args.slot && self.pending_hash == args.expected_hash,
+            MetaAmmError::CurveHashMismatch
+        );
+
+        self.active_slot = args.slot;
+        self.pending_hash = [0; 32];
+        self.sequence = args.sequence;
 
         Ok(())
     }
@@ -977,8 +1190,40 @@ pub struct UpdateReferenceQuoteArgs {
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UpdateReferenceQuoteV2Args {
+    pub mid_price_q64x64: u128,
+    pub base_half_spread_bps: u16,
+    pub publish_slot: u64,
+    pub sequence: u64,
+}
+
+impl UpdateReferenceQuoteV2Args {
+    fn to_legacy_args(self) -> UpdateReferenceQuoteArgs {
+        UpdateReferenceQuoteArgs {
+            mid_price_q64x64: self.mid_price_q64x64,
+            publish_slot: self.publish_slot,
+            sequence: self.sequence,
+        }
+    }
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PausePoolArgs {
     pub paused: bool,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StageCurveSlotArgs {
+    pub slot: u8,
+    pub curve_hash: [u8; 32],
+    pub sequence: u64,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ActivateCurveSlotArgs {
+    pub slot: u8,
+    pub expected_hash: [u8; 32],
+    pub sequence: u64,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -1037,6 +1282,35 @@ fn map_swap_math_error(error: MathError) -> anchor_lang::error::Error {
     }
 }
 
+fn validate_reference_quote_base_spread(
+    base_half_spread_bps: u16,
+    params: ReferenceQuoteParams,
+) -> Result<()> {
+    let worst_spread = (base_half_spread_bps as u32)
+        .saturating_add(params.max_aging_surcharge_bps as u32)
+        .saturating_add(params.max_inventory_skew_bps as u32);
+    require!(
+        worst_spread < 10_000,
+        MetaAmmError::InvalidReferenceQuoteSpread
+    );
+    Ok(())
+}
+
+fn validate_curve_slot(slot: u8) -> Result<()> {
+    require!(slot < MAX_CURVE_SLOTS, MetaAmmError::InvalidCurveSlot);
+    Ok(())
+}
+
+fn quote_age_state_to_u8(age_state: QuoteAgeState) -> u8 {
+    match age_state {
+        QuoteAgeState::Fresh => 0,
+        QuoteAgeState::Aging => 1,
+        QuoteAgeState::Protected => 2,
+        QuoteAgeState::Expired => 3,
+        QuoteAgeState::Paused => 4,
+    }
+}
+
 fn reject_unsupported_token_extensions(mint: &AccountInfo<'_>) -> Result<()> {
     if *mint.owner == TOKEN_2022_PROGRAM_ID
         && get_mint_extension_data::<TransferFeeConfig>(mint).is_ok()
@@ -1044,6 +1318,26 @@ fn reject_unsupported_token_extensions(mint: &AccountInfo<'_>) -> Result<()> {
         return err!(MetaAmmError::UnsupportedTokenExtension);
     }
     Ok(())
+}
+
+#[event]
+pub struct ReferenceSwapEvent {
+    pub pool_config: Pubkey,
+    pub taker: Pubkey,
+    pub base_to_quote: bool,
+    pub amount_in: u64,
+    pub amount_in_less_fee: u64,
+    pub amount_out: u64,
+    pub quote_sequence: u64,
+    pub quote_publish_slot: u64,
+    pub quote_age_slots: u64,
+    pub age_state: u8,
+    pub mid_price_q64x64: u128,
+    pub effective_price_q64x64: u128,
+    pub applied_spread_bps: u16,
+    pub inventory_imbalance_bps: i32,
+    pub new_base_inventory: u64,
+    pub new_quote_inventory: u64,
 }
 
 #[error_code]
@@ -1116,6 +1410,18 @@ pub enum MetaAmmError {
     SwapMathFailed,
     #[msg("token extension is not supported by this instruction")]
     UnsupportedTokenExtension,
+    #[msg("reference quote spread is outside the configured safety envelope")]
+    InvalidReferenceQuoteSpread,
+    #[msg("curve slot state belongs to a different pool config")]
+    CurveSlotPoolMismatch,
+    #[msg("curve slot index is outside the staged curve slot range")]
+    InvalidCurveSlot,
+    #[msg("curve hash must be non-zero")]
+    InvalidCurveHash,
+    #[msg("curve slot sequence must increase monotonically")]
+    NonMonotonicCurveSequence,
+    #[msg("staged curve slot hash does not match activation request")]
+    CurveHashMismatch,
 }
 
 #[cfg(test)]
@@ -1237,6 +1543,20 @@ mod tests {
         }
     }
 
+    fn curve_slot_state(pool_config: Pubkey, authority: Pubkey) -> CurveSlotState {
+        CurveSlotState {
+            pool_config,
+            authority,
+            bump: 250,
+            active_slot: 0,
+            pending_slot: 0,
+            _padding: [0; 5],
+            pending_hash: [0; 32],
+            sequence: 0,
+            reserved: [0; 32],
+        }
+    }
+
     #[test]
     fn init_args_compile_to_reference_quote_strategy_config() {
         let strategy = default_args().strategy_config().unwrap();
@@ -1269,6 +1589,14 @@ mod tests {
         assert_eq!(
             ReferenceQuoteState::INIT_SPACE,
             32 + 32 + 1 + 1 + 1 + 5 + 16 + 8 + 8 + 8
+        );
+    }
+
+    #[test]
+    fn curve_slot_state_account_space_is_stable() {
+        assert_eq!(
+            CurveSlotState::INIT_SPACE,
+            32 + 32 + 1 + 1 + 1 + 5 + 32 + 8 + 32
         );
     }
 
@@ -1476,6 +1804,53 @@ mod tests {
     }
 
     #[test]
+    fn quote_state_spread_marker_preserves_account_size_and_allows_zero() {
+        let mut state = quote_state(key(3), key(2));
+
+        assert_eq!(state.base_half_spread_bps(17), 17);
+        state.set_base_half_spread_bps(0);
+        assert_eq!(state.base_half_spread_bps(17), 0);
+        assert_eq!(state._padding[2], 1);
+    }
+
+    #[test]
+    fn v2_quote_update_can_atomically_update_price_and_spread() {
+        let pool_authority = key(1);
+        let quote_authority = key(2);
+        let mut state = quote_state(key(3), quote_authority);
+        let args = UpdateReferenceQuoteV2Args {
+            mid_price_q64x64: 31_000u128 << 64,
+            base_half_spread_bps: 25,
+            publish_slot: 10,
+            sequence: 1,
+        };
+        let pool = pool_config(pool_authority, 1);
+
+        validate_reference_quote_base_spread(
+            args.base_half_spread_bps,
+            pool.reference_quote_params(),
+        )
+        .unwrap();
+        state
+            .apply_update(pool_authority, quote_authority, args.to_legacy_args(), 12)
+            .unwrap();
+        state.set_base_half_spread_bps(args.base_half_spread_bps);
+
+        assert_eq!(state.mid_price_q64x64, 31_000u128 << 64);
+        assert_eq!(state.sequence, 1);
+        assert_eq!(state.base_half_spread_bps(10), 25);
+    }
+
+    #[test]
+    fn v2_spread_guard_includes_aging_and_inventory_worst_case() {
+        let pool = pool_config(key(1), 1);
+        assert!(validate_reference_quote_base_spread(9_000, pool.reference_quote_params()).is_ok());
+        assert!(
+            validate_reference_quote_base_spread(9_600, pool.reference_quote_params()).is_err()
+        );
+    }
+
+    #[test]
     fn quote_update_accepts_quote_authority() {
         let pool_authority = key(1);
         let quote_authority = key(2);
@@ -1568,6 +1943,64 @@ mod tests {
 
         assert!(state
             .apply_update(pool_authority, quote_authority, args, 12)
+            .is_err());
+    }
+
+    #[test]
+    fn curve_slot_stage_and_activate_are_monotonic() {
+        let mut state = curve_slot_state(key(1), key(2));
+        let hash = [7; 32];
+
+        state
+            .stage(StageCurveSlotArgs {
+                slot: 3,
+                curve_hash: hash,
+                sequence: 1,
+            })
+            .unwrap();
+        assert_eq!(state.pending_slot, 3);
+        assert_eq!(state.pending_hash, hash);
+        assert_eq!(state.sequence, 1);
+
+        assert!(state
+            .activate(ActivateCurveSlotArgs {
+                slot: 3,
+                expected_hash: [8; 32],
+                sequence: 2,
+            })
+            .is_err());
+
+        state
+            .activate(ActivateCurveSlotArgs {
+                slot: 3,
+                expected_hash: hash,
+                sequence: 2,
+            })
+            .unwrap();
+        assert_eq!(state.active_slot, 3);
+        assert_eq!(state.pending_hash, [0; 32]);
+        assert_eq!(state.sequence, 2);
+
+        assert!(state
+            .stage(StageCurveSlotArgs {
+                slot: MAX_CURVE_SLOTS,
+                curve_hash: hash,
+                sequence: 3,
+            })
+            .is_err());
+        assert!(state
+            .stage(StageCurveSlotArgs {
+                slot: 4,
+                curve_hash: [0; 32],
+                sequence: 3,
+            })
+            .is_err());
+        assert!(state
+            .stage(StageCurveSlotArgs {
+                slot: 4,
+                curve_hash: hash,
+                sequence: 2,
+            })
             .is_err());
     }
 }

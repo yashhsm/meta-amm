@@ -50,6 +50,7 @@ type PoolContext = {
   quoteTokenProgram: TokenProgramId;
   poolConfig: PublicKey;
   quoteState: PublicKey;
+  curveSlotState: PublicKey;
   vaultAuthority: PublicKey;
   vaultState: PublicKey;
   baseVault: PublicKey;
@@ -176,6 +177,10 @@ function derivePoolContext(
       seed("quote-state"),
       poolConfig.toBuffer(),
     ]),
+    curveSlotState: pda(programId, [
+      seed("curve-slot-state"),
+      poolConfig.toBuffer(),
+    ]),
     vaultAuthority: pda(programId, [
       seed("vault-authority"),
       poolConfig.toBuffer(),
@@ -292,6 +297,30 @@ async function updateQuote(
     .rpc();
 }
 
+async function updateQuoteV2(
+  program: anchor.Program,
+  context: PoolContext,
+  signer: Keypair,
+  sequence: number,
+  publishSlot: number,
+  baseHalfSpreadBps: number,
+) {
+  await program.methods
+    .updateReferenceQuoteV2({
+      midPriceQ64X64: Q64_ONE,
+      baseHalfSpreadBps,
+      publishSlot: new anchor.BN(publishSlot),
+      sequence: new anchor.BN(sequence),
+    })
+    .accounts({
+      quoteSigner: signer.publicKey,
+      poolConfig: context.poolConfig,
+      quoteState: context.quoteState,
+    })
+    .signers([signer])
+    .rpc();
+}
+
 async function pausePool(
   program: anchor.Program,
   context: PoolContext,
@@ -305,6 +334,68 @@ async function pausePool(
       poolConfig: context.poolConfig,
     })
     .signers([authority])
+    .rpc();
+}
+
+async function initializeCurveSlotState(
+  program: anchor.Program,
+  payer: Keypair,
+  context: PoolContext,
+) {
+  await program.methods
+    .initializeCurveSlotState()
+    .accounts({
+      payer: payer.publicKey,
+      authority: context.authority.publicKey,
+      poolConfig: context.poolConfig,
+      curveSlotState: context.curveSlotState,
+      systemProgram: SystemProgram.programId,
+    })
+    .signers([context.authority])
+    .rpc();
+}
+
+async function stageCurveSlot(
+  program: anchor.Program,
+  context: PoolContext,
+  slot: number,
+  curveHash: number[],
+  sequence: number,
+) {
+  await program.methods
+    .stageCurveSlot({
+      slot,
+      curveHash,
+      sequence: new anchor.BN(sequence),
+    })
+    .accounts({
+      authority: context.authority.publicKey,
+      poolConfig: context.poolConfig,
+      curveSlotState: context.curveSlotState,
+    })
+    .signers([context.authority])
+    .rpc();
+}
+
+async function activateCurveSlot(
+  program: anchor.Program,
+  context: PoolContext,
+  slot: number,
+  expectedHash: number[],
+  sequence: number,
+) {
+  await program.methods
+    .activateCurveSlot({
+      slot,
+      expectedHash,
+      sequence: new anchor.BN(sequence),
+    })
+    .accounts({
+      authority: context.authority.publicKey,
+      poolConfig: context.poolConfig,
+      curveSlotState: context.curveSlotState,
+    })
+    .signers([context.authority])
     .rpc();
 }
 
@@ -598,6 +689,15 @@ async function runLocalSplCase(
 
   await initializePool(program, payer, context);
   await initializeQuoteState(program, payer, context);
+  await initializeCurveSlotState(program, payer, context);
+  const curveHash = Array.from({ length: 32 }, () => 7);
+  await stageCurveSlot(program, context, 2, curveHash, 1);
+  await activateCurveSlot(program, context, 2, curveHash, 2);
+  const curveSlotState = await (program.account as any).curveSlotState.fetch(
+    context.curveSlotState,
+  );
+  assert.equal(curveSlotState.activeSlot, 2);
+  assert.equal(curveSlotState.pendingHash.every((byte: number) => byte === 0), true);
 
   const slot = await provider.connection.getSlot("confirmed");
   await updateQuote(program, context, quoteAuthority, 1, slot);
@@ -891,6 +991,14 @@ async function runLocalSplCase(
   assert.equal(vaultQuoteAfterReverse - vaultQuoteBeforeReverse, 100n);
   assert.equal(vaultBaseBeforeReverse - vaultBaseAfterReverse, baseOut);
   assert(baseOut >= 90n);
+
+  const spreadUpdateSlot = await provider.connection.getSlot("confirmed");
+  await updateQuoteV2(program, context, quoteAuthority, 4, spreadUpdateSlot, 25);
+  const quoteState = await (program.account as any).referenceQuoteState.fetch(
+    context.quoteState,
+  );
+  assert.equal(quoteState.sequence.toString(), "4");
+  assert.equal(quoteState.publishSlot.toString(), String(spreadUpdateSlot));
 
   console.log("ok: local SPL pool quote, vault, and funding invariants");
 }

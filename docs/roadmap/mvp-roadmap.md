@@ -1,5 +1,29 @@
 # MVP Roadmap
 
+## Current Implementation Checkpoint
+
+The repository has now shipped the first ReferenceQuote program slice plus
+several simulator and integration surfaces that were originally planned later:
+
+- maker-owned pool config, quote state, vault state, funding, exact-in swap,
+  and authority pause
+- swap analytics through `ReferenceSwapEvent`
+- quote-age states with aging surcharge, size decay, protected mode, and hard
+  expiry
+- combined midprice plus dynamic spread quote update through
+  `update_reference_quote_v2`
+- curve-slot staging and activation PDA
+- aggregator manifest constants for the ReferenceQuote exact-in account
+  contract
+- TypeScript cached-state ReferenceQuote SDK
+- Piecewise/Prop-style bounded curve math and simulator post-fill policies
+- Surfpool smoke coverage for local SPL, Token-2022 exact-transfer mints, and
+  mainnet mint-profile mimicry
+
+The main gaps before public maker trials remain adapter conformance fixtures,
+compute/account measurements from the latest IDL, broader flow-response
+simulation, formal fuzzing, and a security review pass.
+
 ## Phase 0: Math Kernel and Serialization Hardening
 
 Goal: make numeric behavior trustworthy before any dependent API freezes.

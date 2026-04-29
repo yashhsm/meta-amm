@@ -1,17 +1,18 @@
 use std::{env, fs};
 
 use meta_amm_math::ReferenceQuoteParams;
-use meta_amm_math::{CpmmReserves, Q64x64};
+use meta_amm_math::{CpmmReserves, PiecewiseBookSide, PostFillPolicy, Q64x64};
 use meta_amm_sim::{
     calibrate_reference_quote, default_reference_quote_scenario_pack, evaluate_scenario_pack,
     parse_replay_csv, quote_update_policy_from_replay, simulate_generated_cpmm,
-    simulate_generated_reference_quote, simulate_reference_quote_replay,
+    simulate_generated_reference_quote, simulate_piecewise_prop, simulate_reference_quote_replay,
     simulate_reference_quote_scenario_pack, AggregateReport, CalibrationCandidateReport,
-    FlowDistributionReport, GateFinding, GeneratedCpmmScenario, GeneratedReferenceQuoteScenario,
-    LandingDistributionReport, QuoteUpdatePolicy, ReferenceQuoteAggregateReport,
+    FlowDistributionReport, FlowEvent, GateFinding, GeneratedCpmmScenario,
+    GeneratedReferenceQuoteScenario, LandingDistributionReport, PiecewisePropReport,
+    PiecewisePropScenario, QuoteUpdatePolicy, ReferenceQuoteAggregateReport,
     ReferenceQuoteCalibrationReport, ReferenceQuoteReport, ReferenceQuoteScenario,
     SameSlotUpdateOrder, ScenarioAssumptions, ScenarioGateThresholds, ScenarioPackEvaluation,
-    ScenarioPackReport, SummaryI128, SummaryU128, SummaryU16, SummaryU64,
+    ScenarioPackReport, Side, SummaryI128, SummaryU128, SummaryU16, SummaryU64,
     DEFAULT_REFERENCE_QUOTE_CALIBRATION_SEED,
 };
 
@@ -86,6 +87,17 @@ fn run_generated_smoke() {
     let cpmm_report = simulate_generated_cpmm(cpmm).expect("CPMM smoke scenario should simulate");
     let reference_report = simulate_generated_reference_quote(reference)
         .expect("ReferenceQuote smoke should simulate");
+    let piecewise_events = piecewise_smoke_events();
+    let piecewise_report = simulate_piecewise_prop(
+        PiecewisePropScenario {
+            assumptions,
+            bid_side: piecewise_side(),
+            ask_side: piecewise_side(),
+            post_fill_policy: PostFillPolicy::HealThenAdd,
+        },
+        &piecewise_events,
+    )
+    .expect("PiecewiseProp smoke should simulate");
 
     println!("scenario: {}", assumptions.name);
     println!("flow_model: {}", assumptions.flow_model);
@@ -95,6 +107,8 @@ fn run_generated_smoke() {
     print_cpmm_report(&cpmm_report);
     println!();
     print_reference_report(&reference_report);
+    println!();
+    print_piecewise_report(&piecewise_report);
     println!();
     println!("warning: generated smoke output is not market replay or maker edge");
 }
@@ -231,6 +245,39 @@ fn reference_params() -> ReferenceQuoteParams {
     }
 }
 
+fn piecewise_side() -> PiecewiseBookSide {
+    PiecewiseBookSide::new(
+        [
+            Q64x64::from_int(98),
+            Q64x64::from_int(99),
+            Q64x64::from_int(100),
+            Q64x64::from_int(101),
+            Q64x64::from_int(102),
+            Q64x64::from_int(103),
+            Q64x64::from_int(104),
+        ],
+        600,
+    )
+    .expect("piecewise smoke side should be valid")
+}
+
+fn piecewise_smoke_events() -> [FlowEvent; 2] {
+    [
+        FlowEvent {
+            slot: 1,
+            side: Side::QuoteToBase,
+            amount_in: 9_850,
+            fair_price: Q64x64::from_int(100),
+        },
+        FlowEvent {
+            slot: 2,
+            side: Side::BaseToQuote,
+            amount_in: 100,
+            fair_price: Q64x64::from_int(100),
+        },
+    ]
+}
+
 fn print_cpmm_report(report: &AggregateReport) {
     println!("engine: CPMM");
     print_summary_u64("trades_attempted", &report.trades_attempted);
@@ -257,6 +304,25 @@ fn print_reference_report(report: &ReferenceQuoteAggregateReport) {
     print_summary_u16(
         "max_abs_inventory_imbalance_bps",
         &report.max_abs_inventory_imbalance_bps,
+    );
+}
+
+fn print_piecewise_report(report: &PiecewisePropReport) {
+    println!("engine: PiecewiseProp");
+    println!("trades_attempted: {}", report.trades_attempted);
+    println!("trades_filled: {}", report.trades_filled);
+    println!("trades_rejected: {}", report.trades_rejected);
+    println!("fill_rate_bps: {}", report.fill_rate_bps());
+    println!("post_fills_applied: {}", report.post_fills_applied);
+    println!("max_segments_crossed: {}", report.max_segments_crossed);
+    println!("taker_edge_quote_atoms: {}", report.taker_edge_quote_atoms);
+    println!(
+        "final_bid_consumed_quantity: {}",
+        report.final_bid_side.consumed_quantity
+    );
+    println!(
+        "final_ask_consumed_quantity: {}",
+        report.final_ask_side.consumed_quantity
     );
 }
 

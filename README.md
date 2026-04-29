@@ -25,8 +25,12 @@ The project direction is:
 - [Implementation-slice review](docs/architecture/implementation-slice-review.md)
 - [MVP roadmap](docs/roadmap/mvp-roadmap.md)
 - [Surfpool test specification](docs/testing/surfpool-spec.md)
+- [Hadron and Prop AMM inspiration notes](docs/research/hadron-prop-inspirations.md)
 - Anchor program slices for initializing ReferenceQuote pool config, quote
-  state, and maker-owned vault PDAs
+  state, maker-owned vault PDAs, curve-slot staging, signed quote updates, and
+  exact-in swaps
+- TypeScript cached-state quote SDK and aggregator account manifest
+- Piecewise/Prop-style bounded curve math and simulator post-fill policies
 
 ## Devnet
 
@@ -68,6 +72,8 @@ crates/
   meta_amm_sim/
 programs/
   meta_amm/
+sdk/
+  ts/
 docs/
   architecture/
     architecture.md
@@ -79,6 +85,7 @@ docs/
     mvp-roadmap.md
 tests/
   golden/
+  surfpool/
 ```
 
 ## Development
@@ -94,49 +101,56 @@ cargo run -p meta_amm_sim --quiet -- --calibrate-reference
 cargo run -p meta_amm_sim --quiet -- --calibrate-reference --export-best-config
 cargo run -p meta_amm_sim --quiet -- --replay-csv tests/fixtures/reference-replay.csv
 pnpm install --frozen-lockfile
+pnpm typecheck:sdk
+pnpm test:sdk
 pnpm typecheck:surfpool
 pnpm surfpool:smoke
 ```
 
 The current Anchor program exposes `initialize_reference_quote_pool`,
 `initialize_reference_quote_state`, `update_reference_quote`,
-`pause_pool`, `initialize_maker_vaults`, `fund_pool`, and `swap_exact_in`. Pool
-init creates a deterministic pool-config PDA for an authority/base/quote mint
-tuple, validates ReferenceQuote parameters through the shared bounded config
-compiler, and stores the resulting fixed-size config-layout bytes in the Anchor
-account. Quote-state init binds a quote authority and same-slot ordering
-metadata to the pool config. Quote
-updates are signer-gated and require monotonic sequence plus non-backdated
-publish slots. Pool pause is authority-gated and stops swaps without blocking
-quote refreshes or maker funding. Maker-vault init creates deterministic
-PDA-owned base and quote token accounts for the pool and records them in
-`VaultState`. Funding moves authority-owned tokens into those vaults with
-checked token-interface transfers. Swap execution requires an initialized
-quote, an exact expected quote sequence, minimum output, and checked
-token-interface transfers in both directions. Token-2022 mints are supported
-only when their transfer amount is exact; transfer-fee mints are rejected until
-quotes can account for net received output.
+`update_reference_quote_v2`, `pause_pool`, `initialize_curve_slot_state`,
+`stage_curve_slot`, `activate_curve_slot`, `initialize_maker_vaults`,
+`fund_pool`, and `swap_exact_in`. Pool init creates a deterministic pool-config
+PDA for an authority/base/quote mint tuple, validates ReferenceQuote parameters
+through the shared bounded config compiler, and stores the fixed-size
+config-layout bytes in the Anchor account. Quote-state init binds a quote
+authority, same-slot ordering metadata, and a dynamic base spread marker to the
+pool config. Quote updates are signer-gated and require monotonic sequence plus
+non-backdated publish slots; v2 quote updates atomically update midprice and
+base spread. Curve-slot staging is authority-gated and monotonic, giving future
+curve modes a bounded activation surface before swaps consume curve slots.
+Pool pause is authority-gated and stops swaps without blocking quote refreshes
+or maker funding. Maker-vault init creates deterministic PDA-owned base and
+quote token accounts for the pool and records them in `VaultState`. Funding
+moves authority-owned tokens into those vaults with checked token-interface
+transfers. Swap execution requires an initialized quote, an exact expected
+quote sequence, minimum output, and checked token-interface transfers in both
+directions, then emits `ReferenceSwapEvent` for indexers and maker analytics.
+Token-2022 mints are supported only when their transfer amount is exact;
+transfer-fee mints are rejected until quotes can account for net received
+output.
 
 The current simulator binary is a deterministic multi-path smoke scenario for
-CPMM and ReferenceQuote. ReferenceQuote now models quote landing latency,
-seeded update drops, same-slot update/swap ordering, stale/protected rejects,
-and max quote age. It is useful for checking report plumbing and failure-mode
-visibility, not for claiming maker edge. Multi-path summaries include
-min/p05/mean/p50/p95/max so tails are visible in generated scenario packs.
-Scenario packs also emit pass/warn/block safety gates for fill rate, stale and
-protected rejects, update drops, quote age, and inventory drift.
+CPMM, ReferenceQuote, and PiecewiseProp. ReferenceQuote models quote landing
+latency, seeded update drops, same-slot update/swap ordering, stale/protected
+rejects, and max quote age. PiecewiseProp models bounded price-point depth and
+post-fill replenishment policies before any on-chain curve-slot swap path
+depends on them. The simulator is useful for checking report plumbing and
+failure-mode visibility, not for claiming maker edge. Multi-path summaries
+include min/p05/mean/p50/p95/max so tails are visible in generated scenario
+packs. Scenario packs also emit pass/warn/block safety gates for fill rate,
+stale and protected rejects, update drops, quote age, and inventory drift.
 Reference calibration searches a small generated candidate set and ranks
 candidates by safety gate severity first, then fill-tail and rough maker score.
 The best generated calibration candidate can be exported as a deterministic
 ReferenceQuote config handoff with the assumptions and gate findings attached.
 The config crate compiles that typed strategy into a bounded ReferenceQuote
 config, validating bps ranges, quote-refresh envelope, account budget, and the
-canonical decimal-scale preimage before any on-chain compiler consumes it.
-It also imports the deterministic ReferenceQuote export fixture back into the
-typed compiler input, without adding a JSON dependency.
-The compiled ReferenceQuote config now maps into a fixed-size pool-config
-account layout with tests for byte length, reserved headroom, and swap account
-meta budget.
+canonical decimal-scale preimage before any on-chain compiler consumes it. It
+also exports an aggregator compatibility manifest with the required swap
+account labels and token-support limits. The TypeScript SDK mirrors cached-state
+ReferenceQuote exact-in quotes for adapter and route-test use.
 
 Replay CSV rows use this minimal schema:
 
