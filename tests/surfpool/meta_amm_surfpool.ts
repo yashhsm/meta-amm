@@ -7,11 +7,15 @@ import { fileURLToPath } from "node:url";
 import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
   createAssociatedTokenAccountIdempotentInstruction,
+  createInitializeMintInstruction,
+  createInitializeTransferFeeConfigInstruction,
   createMint,
   createSyncNativeInstruction,
+  ExtensionType,
   getAccount,
   getAssociatedTokenAddressSync,
   getMint,
+  getMintLen,
   getOrCreateAssociatedTokenAccount,
   mintTo,
   NATIVE_MINT,
@@ -372,6 +376,46 @@ async function createWrappedSolSource(
     commitment: "confirmed",
   });
   return source;
+}
+
+async function createTransferFeeMint(
+  connection: anchor.web3.Connection,
+  payer: Keypair,
+  authority: Keypair,
+  decimals: number,
+): Promise<PublicKey> {
+  const mint = Keypair.generate();
+  const mintLen = getMintLen([ExtensionType.TransferFeeConfig]);
+  const lamports = await connection.getMinimumBalanceForRentExemption(mintLen);
+  const tx = new Transaction().add(
+    SystemProgram.createAccount({
+      fromPubkey: payer.publicKey,
+      newAccountPubkey: mint.publicKey,
+      space: mintLen,
+      lamports,
+      programId: TOKEN_2022_PROGRAM_ID,
+    }),
+    createInitializeTransferFeeConfigInstruction(
+      mint.publicKey,
+      authority.publicKey,
+      authority.publicKey,
+      100,
+      10_000n,
+      TOKEN_2022_PROGRAM_ID,
+    ),
+    createInitializeMintInstruction(
+      mint.publicKey,
+      decimals,
+      authority.publicKey,
+      null,
+      TOKEN_2022_PROGRAM_ID,
+    ),
+  );
+  tx.feePayer = payer.publicKey;
+  await sendAndConfirmTransaction(connection, tx, [payer, mint], {
+    commitment: "confirmed",
+  });
+  return mint.publicKey;
 }
 
 async function createEmptyAta(
@@ -914,6 +958,38 @@ async function runToken2022Case(
     750_000n,
     TOKEN_2022_PROGRAM_ID,
   );
+
+  const feeBaseMint = await createTransferFeeMint(
+    provider.connection,
+    payer,
+    authority,
+    6,
+  );
+  const feeQuoteMint = await createMint(
+    provider.connection,
+    payer,
+    authority.publicKey,
+    null,
+    6,
+    undefined,
+    undefined,
+    TOKEN_PROGRAM_ID,
+  );
+  const transferFeeContext = derivePoolContext(
+    program.programId,
+    authority,
+    Keypair.generate(),
+    feeBaseMint,
+    feeQuoteMint,
+    TOKEN_2022_PROGRAM_ID,
+    TOKEN_PROGRAM_ID,
+  );
+  await expectReject(
+    "rejects Token-2022 transfer-fee mints until net-of-fee quoting exists",
+    () => initializePool(program, payer, transferFeeContext),
+    /UnsupportedTokenExtension|custom program error/,
+  );
+
   console.log("ok: Token-2022 base mint funds through TokenInterface");
 }
 

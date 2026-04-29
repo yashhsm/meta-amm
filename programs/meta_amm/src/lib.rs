@@ -2,8 +2,11 @@
 #![forbid(unsafe_code)]
 
 use anchor_lang::prelude::*;
+use anchor_spl::token_2022::spl_token_2022::{
+    extension::transfer_fee::TransferFeeConfig, ID as TOKEN_2022_PROGRAM_ID,
+};
 use anchor_spl::token_interface::{
-    transfer_checked, Mint, TokenAccount, TokenInterface, TransferChecked,
+    get_mint_extension_data, transfer_checked, Mint, TokenAccount, TokenInterface, TransferChecked,
 };
 use meta_amm_config::{
     compile_reference_quote_pool_config_account, reference_quote_params_from_pool_config_bytes,
@@ -34,6 +37,9 @@ pub mod meta_amm {
         ctx: Context<InitializeReferenceQuotePool>,
         args: InitializeReferenceQuotePoolArgs,
     ) -> Result<()> {
+        reject_unsupported_token_extensions(&ctx.accounts.base_mint.to_account_info())?;
+        reject_unsupported_token_extensions(&ctx.accounts.quote_mint.to_account_info())?;
+
         let pool_config = &mut ctx.accounts.pool_config;
         let token_pair = TokenPairIdentity {
             base_mint: ctx.accounts.base_mint.key().to_bytes(),
@@ -115,6 +121,9 @@ pub mod meta_amm {
     }
 
     pub fn initialize_maker_vaults(ctx: Context<InitializeMakerVaults>) -> Result<()> {
+        reject_unsupported_token_extensions(&ctx.accounts.base_mint.to_account_info())?;
+        reject_unsupported_token_extensions(&ctx.accounts.quote_mint.to_account_info())?;
+
         let vault_state = &mut ctx.accounts.vault_state;
         vault_state.pool_config = ctx.accounts.pool_config.key();
         vault_state.maker_authority = ctx.accounts.pool_config.authority;
@@ -135,6 +144,8 @@ pub mod meta_amm {
 
     pub fn fund_pool(ctx: Context<FundPool>, args: FundPoolArgs) -> Result<()> {
         args.validate()?;
+        reject_unsupported_token_extensions(&ctx.accounts.base_mint.to_account_info())?;
+        reject_unsupported_token_extensions(&ctx.accounts.quote_mint.to_account_info())?;
         ctx.accounts.vault_state.assert_maker_owned_for_pool(
             ctx.accounts.pool_config.key(),
             ctx.accounts.pool_config.authority,
@@ -183,6 +194,8 @@ pub mod meta_amm {
 
     pub fn swap_exact_in(ctx: Context<SwapExactIn>, args: SwapExactInArgs) -> Result<()> {
         args.validate()?;
+        reject_unsupported_token_extensions(&ctx.accounts.base_mint.to_account_info())?;
+        reject_unsupported_token_extensions(&ctx.accounts.quote_mint.to_account_info())?;
         ctx.accounts.quote_state.assert_usable_for_swap(
             ctx.accounts.pool_config.key(),
             ctx.accounts.pool_config.reference_quote_same_slot_order()?,
@@ -1024,6 +1037,15 @@ fn map_swap_math_error(error: MathError) -> anchor_lang::error::Error {
     }
 }
 
+fn reject_unsupported_token_extensions(mint: &AccountInfo<'_>) -> Result<()> {
+    if *mint.owner == TOKEN_2022_PROGRAM_ID
+        && get_mint_extension_data::<TransferFeeConfig>(mint).is_ok()
+    {
+        return err!(MetaAmmError::UnsupportedTokenExtension);
+    }
+    Ok(())
+}
+
 #[error_code]
 pub enum MetaAmmError {
     #[msg("ReferenceQuote config failed bounded compiler validation")]
@@ -1092,6 +1114,8 @@ pub enum MetaAmmError {
     InventoryBandExceeded,
     #[msg("swap math failed")]
     SwapMathFailed,
+    #[msg("token extension is not supported by this instruction")]
+    UnsupportedTokenExtension,
 }
 
 #[cfg(test)]

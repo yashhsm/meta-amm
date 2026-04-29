@@ -49,6 +49,8 @@ control of the real USDC mint authority.
     directions.
 15. Pool pause must be authority-gated and must reject swaps without moving
     tokens.
+16. Token-2022 transfer-fee mints must be rejected until swap quotes can
+    enforce `minimum_amount_out` on net received tokens.
 
 ## Cases
 
@@ -91,6 +93,8 @@ After vault initialization:
 
 Create a local Token-2022 mint as one side of a pool and verify
 `initialize_maker_vaults` plus `fund_pool` through the token-interface path.
+Create a Token-2022 transfer-fee mint and verify pool initialization rejects it,
+because the current swap instruction quotes nominal transfer amounts only.
 
 ## Running
 

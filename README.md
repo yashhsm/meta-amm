@@ -113,7 +113,9 @@ PDA-owned base and quote token accounts for the pool and records them in
 `VaultState`. Funding moves authority-owned tokens into those vaults with
 checked token-interface transfers. Swap execution requires an initialized
 quote, an exact expected quote sequence, minimum output, and checked
-token-interface transfers in both directions.
+token-interface transfers in both directions. Token-2022 mints are supported
+only when their transfer amount is exact; transfer-fee mints are rejected until
+quotes can account for net received output.
 
 The current simulator binary is a deterministic multi-path smoke scenario for
 CPMM and ReferenceQuote. ReferenceQuote now models quote landing latency,
