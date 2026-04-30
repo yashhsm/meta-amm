@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   buildReferenceQuoteAggregatorManifest,
   Q64,
@@ -7,6 +10,9 @@ import {
   type ReferenceQuoteCachedState,
   type ReferenceQuoteParams,
 } from "./index.js";
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const PARITY_FIXTURE = path.join(ROOT, "tests/golden/reference-quote-parity.csv");
 
 function params(): ReferenceQuoteParams {
   return {
@@ -86,4 +92,129 @@ function state(nowSlot = 10n): ReferenceQuoteCachedState {
   assert.equal(manifest.supportsTransferFeeMints, false);
 }
 
+for (const row of parseParityRows(fs.readFileSync(PARITY_FIXTURE, "utf8"))) {
+  const quote = quoteReferenceExactIn(
+    {
+      baseInventory: row.baseInventory,
+      quoteInventory: row.quoteInventory,
+      targetBaseInventory: row.targetBaseInventory,
+      midPriceQ64x64: row.midPriceInt * Q64,
+      midPublishSlot: row.midPublishSlot,
+      nowSlot: row.nowSlot,
+      paused: row.paused,
+    },
+    {
+      feeBps: row.feeBps,
+      baseHalfSpreadBps: row.baseHalfSpreadBps,
+      agingStartSlots: row.agingStartSlots,
+      protectedStartSlots: row.protectedStartSlots,
+      expireSlots: row.expireSlots,
+      agingSurchargeBpsPerSlot: row.agingSurchargeBpsPerSlot,
+      maxAgingSurchargeBps: row.maxAgingSurchargeBps,
+      maxTradeBaseAtoms: row.maxTradeBaseAtoms,
+      protectedMaxTradeBaseAtoms: row.protectedMaxTradeBaseAtoms,
+      inventorySkewBpsPer10KImbalance: row.inventorySkewBpsPer10KImbalance,
+      maxInventorySkewBps: row.maxInventorySkewBps,
+      hardInventoryBandBps: row.hardInventoryBandBps,
+    },
+    row.amountIn,
+    row.baseToQuote,
+  );
+
+  assert.equal(quote.ageState, row.ageState, row.name);
+  assert.equal(quote.amountInLessFee, row.amountInLessFee, row.name);
+  assert.equal(quote.amountOut, row.amountOut, row.name);
+  assert.equal(quote.newBaseInventory, row.newBaseInventory, row.name);
+  assert.equal(quote.newQuoteInventory, row.newQuoteInventory, row.name);
+  assert.equal(quote.effectivePriceQ64x64, row.effectivePriceQ64x64, row.name);
+  assert.equal(quote.appliedSpreadBps, row.appliedSpreadBps, row.name);
+  assert.equal(quote.inventoryImbalanceBps, row.inventoryImbalanceBps, row.name);
+}
+
 console.log("sdk quote tests passed");
+
+type ParityRow = {
+  name: string;
+  baseInventory: bigint;
+  quoteInventory: bigint;
+  targetBaseInventory: bigint;
+  midPriceInt: bigint;
+  midPublishSlot: bigint;
+  nowSlot: bigint;
+  paused: boolean;
+  feeBps: number;
+  baseHalfSpreadBps: number;
+  agingStartSlots: bigint;
+  protectedStartSlots: bigint;
+  expireSlots: bigint;
+  agingSurchargeBpsPerSlot: number;
+  maxAgingSurchargeBps: number;
+  maxTradeBaseAtoms: bigint;
+  protectedMaxTradeBaseAtoms: bigint;
+  inventorySkewBpsPer10KImbalance: number;
+  maxInventorySkewBps: number;
+  hardInventoryBandBps: number;
+  amountIn: bigint;
+  baseToQuote: boolean;
+  ageState: string;
+  amountInLessFee: bigint;
+  amountOut: bigint;
+  newBaseInventory: bigint;
+  newQuoteInventory: bigint;
+  effectivePriceQ64x64: bigint;
+  appliedSpreadBps: number;
+  inventoryImbalanceBps: number;
+};
+
+function parseParityRows(input: string): ParityRow[] {
+  return input
+    .trim()
+    .split("\n")
+    .slice(1)
+    .map((line) => {
+      const fields = line.split(",");
+      assert.equal(fields.length, 30, "unexpected parity fixture width");
+      return {
+        name: fields[0],
+        baseInventory: BigInt(fields[1]),
+        quoteInventory: BigInt(fields[2]),
+        targetBaseInventory: BigInt(fields[3]),
+        midPriceInt: BigInt(fields[4]),
+        midPublishSlot: BigInt(fields[5]),
+        nowSlot: BigInt(fields[6]),
+        paused: parseBool(fields[7]),
+        feeBps: Number(fields[8]),
+        baseHalfSpreadBps: Number(fields[9]),
+        agingStartSlots: BigInt(fields[10]),
+        protectedStartSlots: BigInt(fields[11]),
+        expireSlots: BigInt(fields[12]),
+        agingSurchargeBpsPerSlot: Number(fields[13]),
+        maxAgingSurchargeBps: Number(fields[14]),
+        maxTradeBaseAtoms: BigInt(fields[15]),
+        protectedMaxTradeBaseAtoms: BigInt(fields[16]),
+        inventorySkewBpsPer10KImbalance: Number(fields[17]),
+        maxInventorySkewBps: Number(fields[18]),
+        hardInventoryBandBps: Number(fields[19]),
+        amountIn: BigInt(fields[20]),
+        baseToQuote: parseBool(fields[21]),
+        ageState: fields[22],
+        amountInLessFee: BigInt(fields[23]),
+        amountOut: BigInt(fields[24]),
+        newBaseInventory: BigInt(fields[25]),
+        newQuoteInventory: BigInt(fields[26]),
+        effectivePriceQ64x64: BigInt(fields[27]),
+        appliedSpreadBps: Number(fields[28]),
+        inventoryImbalanceBps: Number(fields[29]),
+      };
+    });
+}
+
+function parseBool(input: string): boolean {
+  if (input === "true") {
+    return true;
+  }
+  if (input === "false") {
+    return false;
+  }
+  throw new Error(`invalid bool field: ${input}`);
+}

@@ -271,9 +271,12 @@ fn segment_from_consumed(side: PiecewiseBookSide) -> usize {
     if side.consumed_quantity >= side.total_quantity {
         return PIECEWISE_SEGMENT_COUNT - 1;
     }
-    ((side.consumed_quantity as u128) * (PIECEWISE_SEGMENT_COUNT as u128)
-        / (side.total_quantity as u128))
-        .min((PIECEWISE_SEGMENT_COUNT - 1) as u128) as usize
+    for segment in 0..PIECEWISE_SEGMENT_COUNT {
+        if side.consumed_quantity < segment_end(side.total_quantity, segment) {
+            return segment;
+        }
+    }
+    PIECEWISE_SEGMENT_COUNT - 1
 }
 
 fn segment_start(total_quantity: u64, segment: usize) -> u64 {

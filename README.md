@@ -128,6 +128,9 @@ edge.
 - [MVP roadmap](docs/roadmap/mvp-roadmap.md)
 - [Implementation-slice review](docs/architecture/implementation-slice-review.md)
 - [Surfpool test spec](docs/testing/surfpool-spec.md)
+- [Fuzzing and parity strategy](docs/testing/fuzzing.md)
+- [Account budget](docs/testing/account-budget.md)
+- [Security review 2026-04-30](docs/security/security-review-2026-04-30.md)
 - [Reference review](docs/research/reference-review.md)
 - [Hadron and Prop AMM inspiration notes](docs/research/hadron-prop-inspirations.md)
 
