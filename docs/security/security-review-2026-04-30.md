@@ -11,18 +11,30 @@ Scope:
 This is a self-review of the current implementation state. It is not an
 independent audit.
 
+## Follow-Up Status
+
+The two medium findings from this review now have executable in-repo coverage:
+
+- `pnpm surfpool:fuzz` runs deterministic instruction-level fuzzing against a
+  deployed Surfpool fork and asserts failed generated swaps do not move tokens.
+- `pnpm surfpool:cu` measures per-instruction CU through transaction simulation
+  logs and records the current baseline in `docs/testing/account-budget.md`.
+
+Trident and Mollusk remain useful deeper backends, but the default repo workflow
+no longer depends on globally installed copies of either tool.
+
 ## Findings
 
 No critical or high-severity issues were found in this pass.
 
 ## Medium
 
-1. Instruction-level fuzzing is not yet wired.
+1. Instruction-level fuzzing was not wired at review time.
 
-The repo now has property fuzzing for math and quote invariants, but the Anchor
-instruction surface is not yet covered by Trident-style generated account and
-transaction fuzzing. The remaining risk is invalid account combinations or
-state-machine sequences that unit tests and Surfpool smoke do not enumerate.
+The repo now has deterministic Surfpool instruction fuzzing for generated
+account, signer, quote-sequence, slippage, and swap-conservation cases. The
+remaining risk is deeper stateful generation across larger account graphs,
+which should still move to Trident once the program surface expands.
 
 Recommended remediation:
 
@@ -32,10 +44,10 @@ Recommended remediation:
 - Assert only authorized signers mutate pool, quote, vault, or curve-slot
   state.
 
-2. Compute-unit budget is documented but not benchmarked.
+2. Compute-unit budget was documented but not benchmarked at review time.
 
 The account budget is explicit and remains at 13 required metas for exact-in
-ReferenceQuote swaps, but CU has not been benchmarked after adding events,
+ReferenceQuote swaps. `pnpm surfpool:cu` now benchmarks CU after adding events,
 curve-slot instructions, and quote v2.
 
 Recommended remediation:
@@ -95,4 +107,6 @@ pnpm test:sdk
 pnpm typecheck:surfpool
 anchor build
 pnpm surfpool:smoke
+pnpm surfpool:fuzz
+pnpm surfpool:cu
 ```

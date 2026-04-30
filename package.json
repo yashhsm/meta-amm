@@ -6,7 +6,11 @@
     "test:sdk": "tsx sdk/ts/src/index.test.ts",
     "typecheck:surfpool": "tsc --noEmit --skipLibCheck --types node --target ES2022 --module NodeNext --moduleResolution NodeNext tests/surfpool/meta_amm_surfpool.ts",
     "test:surfpool": "tsx tests/surfpool/meta_amm_surfpool.ts",
-    "surfpool:smoke": "bash scripts/surfpool_smoke.sh"
+    "test:surfpool:fuzz": "META_AMM_SURFPOOL_MODE=fuzz tsx tests/surfpool/meta_amm_surfpool.ts",
+    "test:surfpool:cu": "META_AMM_SURFPOOL_MODE=cu tsx tests/surfpool/meta_amm_surfpool.ts",
+    "surfpool:smoke": "bash scripts/surfpool_smoke.sh",
+    "surfpool:fuzz": "SURFPOOL_TEST_SCRIPT=test:surfpool:fuzz bash scripts/surfpool_smoke.sh",
+    "surfpool:cu": "SURFPOOL_TEST_SCRIPT=test:surfpool:cu bash scripts/surfpool_smoke.sh"
   },
   "devDependencies": {
     "@coral-xyz/anchor": "0.32.1",

@@ -61,6 +61,32 @@ without a fresh account/CU measurement.
 
 ## Measurement Status
 
-Current tests validate account order and fork execution, but this report is not
-yet a compute-unit benchmark. The next measurement layer should use Mollusk or
-transaction simulation logs to record CU for each implemented instruction.
+`pnpm surfpool:cu` deploys the program to a Surfpool fork, simulates each
+implemented instruction as a single v0 transaction, parses the program compute
+log, executes the same transaction, and writes the full JSON report to
+`target/surfpool-compute-budget.json`.
+
+Latest measured run:
+
+| Instruction | Consumed CU |
+| --- | ---: |
+| `initialize_reference_quote_pool` | 15,282 |
+| `initialize_reference_quote_state` | 12,785 |
+| `initialize_curve_slot_state` | 9,674 |
+| `stage_curve_slot` | 5,929 |
+| `activate_curve_slot` | 5,943 |
+| `initialize_maker_vaults` | 42,745 |
+| `fund_pool` | 29,675 |
+| `update_reference_quote` | 6,207 |
+| `update_reference_quote_v2` | 6,257 |
+| `pause_pool` | 3,458 |
+| `swap_exact_in` | 33,874 |
+
+Measured max: 42,745 CU.
+
+Measured exact-in swap: 33,874 CU with 13 required account metas.
+
+These numbers are from a local Surfpool fork and should be treated as regression
+baselines, not final mainnet fee settings. Re-run `pnpm surfpool:cu` after every
+program instruction change that affects accounts, events, token movement, or
+math branches.

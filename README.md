@@ -94,6 +94,8 @@ Program and fork smoke:
 ```sh
 anchor build
 pnpm surfpool:smoke
+pnpm surfpool:fuzz
+pnpm surfpool:cu
 ```
 
 Install JS dependencies with:
